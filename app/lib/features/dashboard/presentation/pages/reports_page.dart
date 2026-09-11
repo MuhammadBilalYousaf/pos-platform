@@ -1106,7 +1106,7 @@ class _DiscountsTab extends StatelessWidget {
                   value: formatRs(s.refundTotal),
                   icon: Icons.undo_rounded,
                   iconColor: kReportDanger,
-                  subtitle: '${s.refundCount} refunds (not stored on orders yet)',
+                  subtitle: '${s.refundCount} refunds in this period',
                 ),
                 ReportKpiCard(
                   label: 'Cancellations',
@@ -1271,7 +1271,7 @@ class _DiscountSummary extends StatelessWidget {
         ),
         Expanded(
           child: Text(
-            'Refunds: ${formatRs(stats.refundTotal)} (${stats.refundCount}) — refund amounts are not stored on order documents yet',
+            'Refunds: ${formatRs(stats.refundTotal)} (${stats.refundCount} in selected date range)',
           ),
         ),
         Expanded(

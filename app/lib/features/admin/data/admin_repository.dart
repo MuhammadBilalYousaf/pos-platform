@@ -56,6 +56,7 @@ class InventoryTransaction {
     required this.createdAt,
     this.inventoryId,
     this.ingredientId,
+    this.branchId,
     this.reason,
     this.orderId,
     this.createdBy,
@@ -67,6 +68,7 @@ class InventoryTransaction {
   final DateTime createdAt;
   final String? inventoryId;
   final String? ingredientId;
+  final String? branchId;
   final String? reason;
   final String? orderId;
   final String? createdBy;
@@ -563,12 +565,14 @@ class AdminRepository {
       final rows = snap.docs.map((doc) {
         final data = asStringKeyMap(doc.data());
         final created = data['created_at'];
+        final branchId = readString(data, ['branch_id', 'branchId'], doc.id.split('_').first);
         return InventoryTransaction(
           id: doc.id,
           type: readString(data, ['type'], 'ADJUST'),
           quantity: readString(data, ['quantity_base', 'quantityBase'], '0'),
           inventoryId: pick(data, ['inventory_id', 'inventoryId'])?.toString(),
           ingredientId: pick(data, ['ingredient_id', 'ingredientId'])?.toString(),
+          branchId: branchId,
           reason: pick(data, ['reason'])?.toString(),
           orderId: pick(data, ['order_id', 'orderId'])?.toString(),
           createdBy: pick(data, ['created_by', 'createdBy'])?.toString(),
@@ -576,7 +580,8 @@ class AdminRepository {
         );
       }).where((row) {
         if (inventoryId != null && row.inventoryId != inventoryId) return false;
-        return _tenant.matchesBranch(row.inventoryId?.split('_').first);
+        final branch = row.branchId ?? row.inventoryId?.split('_').first;
+        return _tenant.matchesBranch(branch);
       }).toList();
       rows.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       return rows;
@@ -637,24 +642,30 @@ class AdminRepository {
     required String delta,
     required String reason,
   }) async {
+    Failure? localFailure;
     try {
+      final change = parseMoneyInputOrThrow(delta, label: 'Stock change');
       final businessId = _tenant.requireBusinessId();
       final db = _firestore.requireDb();
       final ref = db.collection('businesses').doc(businessId).collection('inventory').doc(inventoryId);
       await db.runTransaction((tx) async {
         final snap = await tx.get(ref);
         if (!snap.exists) {
-          throw const Failure('Inventory item was not found.');
+          localFailure = const Failure('Inventory item was not found.');
+          throw localFailure!;
         }
         final data = asStringKeyMap(snap.data());
-        final next = money(readString(data, ['quantity_base', 'quantityBase'], '0')) + money(delta);
+        final branchId = readString(data, ['branch_id', 'branchId'], inventoryId.split('_').first);
+        final next = money(readString(data, ['quantity_base', 'quantityBase'], '0')) + change;
         if (next < money('0')) {
-          throw const Failure('Stock cannot go below zero.');
+          localFailure = const Failure('Stock cannot go below zero.');
+          throw localFailure!;
         }
         tx.update(ref, {'quantity_base': moneyString(next)});
         tx.set(db.collection('businesses').doc(businessId).collection('inventory_transactions').doc(), {
           'type': 'ADJUST',
-          'quantity_base': delta,
+          'branch_id': branchId,
+          'quantity_base': moneyString(change),
           'reason': reason,
           'inventory_id': inventoryId,
           'created_at': FieldValue.serverTimestamp(),
@@ -662,6 +673,8 @@ class AdminRepository {
         });
       });
     } catch (error) {
+      if (localFailure != null) throw localFailure!;
+      if (error is Failure) rethrow;
       throw mapFirebaseFailure(error);
     }
   }

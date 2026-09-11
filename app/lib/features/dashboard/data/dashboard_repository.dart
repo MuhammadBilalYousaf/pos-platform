@@ -167,6 +167,7 @@ class DashboardRepository {
         final data = asStringKeyMap(doc.data());
         data['id'] = doc.id;
         if (readString(data, ['status'], 'COMPLETED') == 'CANCELLED') continue;
+        if (readString(data, ['status'], 'COMPLETED') == 'REFUNDED') continue;
         if (!_tenant.matchesBranch(readString(data, ['branch_id', 'branchId']))) continue;
         final at = _createdAt(data['created_at']);
         if (at == null) continue;
@@ -176,6 +177,9 @@ class DashboardRepository {
         if (!isToday && !isYesterday) continue;
 
         final total = money(readString(data, ['total'], '0'));
+        final refundTotal = money(readString(data, ['refund_total'], '0'));
+        final netTotal = total - refundTotal;
+        final salesAmount = netTotal < Decimal.zero ? Decimal.zero : netTotal;
         var lineCount = 0;
         for (final raw in readList(data, ['items'])) {
           final item = asStringKeyMap(raw);
@@ -194,7 +198,7 @@ class DashboardRepository {
 
         if (isToday) {
           todayCount += 1;
-          todaySales += total;
+          todaySales += salesAmount;
           todayItems += lineCount;
           final type = readString(data, ['order_type', 'orderType'], 'TAKEAWAY');
           if (type == 'DINE_IN') {
@@ -215,12 +219,12 @@ class DashboardRepository {
           } else {
             customers.add(readString(data, ['customer_name', 'customerName'], 'Walk-in'));
           }
-          hourSales[at.hour] += total;
+          hourSales[at.hour] += salesAmount;
           hourOrders[at.hour] += 1;
           todayRows.add(data);
         } else {
           yesterdayCount += 1;
-          yesterdaySales += total;
+          yesterdaySales += salesAmount;
           yesterdayItems += lineCount;
         }
       }
@@ -449,6 +453,7 @@ class DashboardRepository {
         if (at == null || at.isBefore(fetchStart)) continue;
 
         final status = readString(data, ['status'], 'COMPLETED');
+        final refundTotal = money(readString(data, ['refund_total'], '0'));
         final items = <_LineRow>[];
         for (final raw in readList(data, ['items'])) {
           final item = asStringKeyMap(raw);
@@ -483,6 +488,7 @@ class DashboardRepository {
             branchId: branchId,
             status: status,
             total: money(readString(data, ['total'], '0')),
+            refundTotal: refundTotal,
             tax: money(readString(data, ['tax', 'taxAmount'], '0')),
             discount: money(readString(data, ['discount', 'discountAmount'], '0')),
             cashierName: cashier.isEmpty ? 'Unknown' : cashier,
@@ -491,6 +497,24 @@ class DashboardRepository {
             payments: payments,
           ),
         );
+      }
+
+      var refundsInRange = Decimal.zero;
+      var refundsInRangeCount = 0;
+      for (final doc in ordersSnap.docs) {
+        final data = asStringKeyMap(doc.data());
+        if (!_tenant.matchesBranch(readString(data, ['branch_id', 'branchId']))) continue;
+        for (final raw in readList(data, ['refunds'])) {
+          final refund = asStringKeyMap(raw);
+          final refundedAt = _createdAt(refund['created_at']);
+          if (refundedAt == null ||
+              refundedAt.isBefore(rangeStart) ||
+              !refundedAt.isBefore(rangeEnd)) {
+            continue;
+          }
+          refundsInRange += money(readString(refund, ['amount'], '0'));
+          refundsInRangeCount += 1;
+        }
       }
 
       bool passFilters(_OrderRow order) {
@@ -518,7 +542,7 @@ class DashboardRepository {
         return [
           for (final o in allOrders)
             if (!o.at.isBefore(start) && o.at.isBefore(endExclusive))
-              if (includeCancelled || o.status != 'CANCELLED')
+              if (includeCancelled || (o.status != 'CANCELLED' && o.status != 'REFUNDED'))
                 if (passFilters(o)) o,
         ];
       }
@@ -532,7 +556,7 @@ class DashboardRepository {
       ];
 
       Decimal sumSales(List<_OrderRow> rows) =>
-          rows.fold(Decimal.zero, (s, o) => s + o.total);
+          rows.fold(Decimal.zero, (s, o) => s + o.netTotal);
       Decimal sumTax(List<_OrderRow> rows) => rows.fold(Decimal.zero, (s, o) => s + o.tax);
       Decimal sumDiscount(List<_OrderRow> rows) => rows.fold(Decimal.zero, (s, o) => s + o.discount);
       double sumItems(List<_OrderRow> rows) {
@@ -625,20 +649,20 @@ class DashboardRepository {
 
       for (final o in current) {
         final itemQty = o.items.fold<double>(0, (s, i) => s + i.quantity);
-        touchDay(o.at, o.total, 1, itemQty);
-        hourSales[o.at.hour] += o.total;
+        touchDay(o.at, o.netTotal, 1, itemQty);
+        hourSales[o.at.hour] += o.netTotal;
         hourOrders[o.at.hour] += 1;
         final wd = o.at.weekday;
-        weekdaySales[wd] += o.total;
+        weekdaySales[wd] += o.netTotal;
         weekdayOrders[wd] += 1;
         weekdayItems[wd] += itemQty;
         weekdaySamples[wd]!.add(dayKey(o.at));
 
-        branchSales[o.branchId] = (branchSales[o.branchId] ?? Decimal.zero) + o.total;
+        branchSales[o.branchId] = (branchSales[o.branchId] ?? Decimal.zero) + o.netTotal;
         branchOrders[o.branchId] = (branchOrders[o.branchId] ?? 0) + 1;
         branchItems[o.branchId] = (branchItems[o.branchId] ?? 0) + itemQty;
 
-        empSales[o.employeeKey] = (empSales[o.employeeKey] ?? Decimal.zero) + o.total;
+        empSales[o.employeeKey] = (empSales[o.employeeKey] ?? Decimal.zero) + o.netTotal;
         empOrders[o.employeeKey] = (empOrders[o.employeeKey] ?? 0) + 1;
         empItems[o.employeeKey] = (empItems[o.employeeKey] ?? 0) + itemQty;
         empDiscounts[o.employeeKey] = (empDiscounts[o.employeeKey] ?? Decimal.zero) + o.discount;
@@ -687,7 +711,7 @@ class DashboardRepository {
       }
 
       for (final o in previous) {
-        branchPrevSales[o.branchId] = (branchPrevSales[o.branchId] ?? Decimal.zero) + o.total;
+        branchPrevSales[o.branchId] = (branchPrevSales[o.branchId] ?? Decimal.zero) + o.netTotal;
       }
       for (final o in cancelled) {
         empCancel[o.employeeKey] = (empCancel[o.employeeKey] ?? 0) + 1;
@@ -913,13 +937,13 @@ class DashboardRepository {
           ? 0.0
           : cancelled.length / (current.length + cancelled.length) * 100;
 
-      // Refunds are not persisted yet — surface as zero with cancelled tracked separately.
+      // Refund KPIs use refund transaction timestamps in the selected range.
       final discountRefunds = DiscountRefundStats(
         discountTotal: totalDiscounts,
         discountedOrders: discountedOrders,
         discountPercentOfSales: discountPct,
-        refundTotal: Decimal.zero,
-        refundCount: 0,
+        refundTotal: refundsInRange,
+        refundCount: refundsInRangeCount,
         cancelledCount: cancelled.length,
         cancelledValue: cancelledValue,
         cancelledPercentOfOrders: cancelPct,
@@ -977,7 +1001,7 @@ class DashboardRepository {
         totalItems: totalItems,
         totalDiscounts: totalDiscounts,
         totalTax: totalTax,
-        refunds: Decimal.zero,
+        refunds: refundsInRange,
         cancelledOrders: cancelled.length,
         cancelledValue: cancelledValue,
         kpiTrends: kpiTrends,
@@ -1033,6 +1057,7 @@ class _OrderRow {
     required this.branchId,
     required this.status,
     required this.total,
+    required this.refundTotal,
     required this.tax,
     required this.discount,
     required this.cashierName,
@@ -1045,10 +1070,17 @@ class _OrderRow {
   final String branchId;
   final String status;
   final Decimal total;
+  final Decimal refundTotal;
   final Decimal tax;
   final Decimal discount;
   final String cashierName;
   final String employeeKey;
   final List<_LineRow> items;
   final List<_PayRow> payments;
+
+  Decimal get netTotal {
+    if (status == 'REFUNDED') return Decimal.zero;
+    final net = total - refundTotal;
+    return net < Decimal.zero ? Decimal.zero : net;
+  }
 }

@@ -1,6 +1,37 @@
 import 'package:decimal/decimal.dart';
 
-Decimal money(String value) => Decimal.parse(value);
+import '../errors/failures.dart';
+
+Decimal money(String value) {
+  final parsed = parseMoneyInput(value);
+  if (parsed == null) {
+    throw FormatException('Invalid amount: $value');
+  }
+  return parsed;
+}
+
+/// Parses currency/quantity text (`10`, `+10`, `-2.5`). Returns null if invalid.
+Decimal? parseMoneyInput(String raw) {
+  var text = raw.trim().replaceAll(',', '');
+  if (text.isEmpty) return null;
+  if (text.startsWith('+')) {
+    text = text.substring(1).trim();
+    if (text.isEmpty) return null;
+  }
+  try {
+    return Decimal.parse(text);
+  } catch (_) {
+    return null;
+  }
+}
+
+Decimal parseMoneyInputOrThrow(String raw, {String label = 'Amount'}) {
+  final parsed = parseMoneyInput(raw);
+  if (parsed == null) {
+    throw Failure('$label is not a valid number.');
+  }
+  return parsed;
+}
 
 String moneyString(Decimal value) => value.round(scale: 2).toStringAsFixed(2);
 

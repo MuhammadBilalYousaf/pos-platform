@@ -2,7 +2,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../config/dependency_injection/injection.dart';
+import 'package:decimal/decimal.dart';
+import '../../../../core/errors/failures.dart';
 import '../../../../core/utils/json_read.dart';
+import '../../../../core/utils/order_totals.dart';
 import '../../../../core/widgets/workbench.dart';
 import '../../../../core/widgets/admin_ui_kit.dart';
 import 'package:intl/intl.dart';
@@ -81,7 +84,7 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
       if (_statusFilter == 'CANCELLED' && status != 'CANCELLED') return false;
       if (_statusFilter == 'PENDING' && status != 'PENDING' && status != 'OPEN') return false;
       if (_statusFilter == 'HELD' && status != 'HELD' && status != 'ON_HOLD') return false;
-      if (_statusFilter == 'REFUNDED' && status != 'REFUNDED') return false;
+      if (_statusFilter == 'REFUNDED' && status != 'REFUNDED' && status != 'PARTIALLY_REFUNDED') return false;
       if (_query.isEmpty) return true;
       final hay = '${row['order_number']} ${row['customer_name']} ${row['total']} ${row['order_type']} ${row['cashier_name']}'.toLowerCase();
       return hay.contains(_query.toLowerCase());
@@ -145,9 +148,11 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
                                           final tone = switch (status.toUpperCase()) {
                                             'COMPLETED' => AdminStatusTone.success,
                                             'CANCELLED' || 'REFUNDED' => AdminStatusTone.danger,
+                                            'PARTIALLY_REFUNDED' => AdminStatusTone.warning,
                                             'PENDING' || 'OPEN' || 'HELD' || 'ON_HOLD' => AdminStatusTone.warning,
                                             _ => AdminStatusTone.neutral,
                                           };
+                                          final statusLabel = status.toUpperCase() == 'PARTIALLY_REFUNDED' ? 'Partial refund' : status;
                                           return InkWell(
                                             onTap: () => _open(row),
                                             child: Padding(
@@ -162,7 +167,7 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
                                                   Expanded(child: Text(readString(row, ['customer_name'], 'Walk-in'), maxLines: 1, overflow: TextOverflow.ellipsis)),
                                                   Expanded(child: Text(readString(row, ['branch_id', 'branchId']), maxLines: 1, overflow: TextOverflow.ellipsis)),
                                                   Expanded(child: Text('Rs. ${readString(row, ['total'])}', style: const TextStyle(fontWeight: FontWeight.w600))),
-                                                  Expanded(child: AdminStatusPill(label: status, tone: tone)),
+                                                  Expanded(child: AdminStatusPill(label: statusLabel, tone: tone)),
                                                   Expanded(
                                                     child: Align(
                                                       alignment: Alignment.centerRight,
@@ -213,8 +218,20 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
         ),
         actions: [
           if (auth is AuthAuthenticated &&
+              (auth.session.user.can(PosPermissions.ordersRefund) ||
+                  auth.session.user.can(PosPermissions.orderRefund)) &&
+              _canRefund(readString(row, ['status'], 'COMPLETED')) &&
+              _refundRemaining(row) > Decimal.zero)
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(context);
+                await _refund(context, row);
+              },
+              child: const Text('Refund'),
+            ),
+          if (auth is AuthAuthenticated &&
               auth.session.user.can(PosPermissions.orderCancel) &&
-              readString(row, ['status']) != 'CANCELLED')
+              _canCancel(readString(row, ['status'], 'COMPLETED')))
             TextButton(
               onPressed: () async {
                 Navigator.pop(context);
@@ -240,6 +257,132 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
         ],
       ),
     );
+  }
+
+  bool _canRefund(String status) {
+    final s = status.toUpperCase();
+    return s == 'COMPLETED' || s == 'PARTIALLY_REFUNDED';
+  }
+
+  bool _canCancel(String status) {
+    final s = status.toUpperCase();
+    return s != 'CANCELLED' && s != 'REFUNDED' && s != 'COMPLETED' && s != 'PARTIALLY_REFUNDED';
+  }
+
+  Decimal _refundRemaining(Map<String, dynamic> row) {
+    final total = money(readString(row, ['total'], '0'));
+    final refunded = money(readString(row, ['refund_total'], '0'));
+    final remaining = total - refunded;
+    return remaining < Decimal.zero ? Decimal.zero : remaining;
+  }
+
+  Future<void> _refund(BuildContext context, Map<String, dynamic> row) async {
+    final remaining = _refundRemaining(row);
+    if (remaining <= Decimal.zero) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Nothing left to refund on this order.')));
+      return;
+    }
+    const methods = ['CASH', 'CARD', 'BANK_TRANSFER', 'EASYPAISA', 'JAZZCASH', 'OTHER'];
+    final amount = TextEditingController(text: moneyString(remaining));
+    final reason = TextEditingController();
+    var method = readList(row, ['payments']).isEmpty
+        ? 'CASH'
+        : readString(asStringKeyMap(readList(row, ['payments']).first), ['method'], 'CASH');
+    var restoreStock = true;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setLocal) {
+            final parsed = money(amount.text.trim().isEmpty ? '0' : amount.text.trim());
+            final isFull = parsed >= remaining;
+            return AlertDialog(
+              title: Text('Refund ${readString(row, ['order_number'])}'),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text('Order total: Rs. ${readString(row, ['total'])}'),
+                    if (money(readString(row, ['refund_total'], '0')) > Decimal.zero)
+                      Text('Already refunded: Rs. ${readString(row, ['refund_total'])}'),
+                    Text('Remaining: Rs. ${moneyString(remaining)}', style: const TextStyle(fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: amount,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: const InputDecoration(labelText: 'Refund amount'),
+                      onChanged: (_) => setLocal(() {}),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: methods.contains(method) ? method : 'CASH',
+                      decoration: const InputDecoration(labelText: 'Refund method'),
+                      items: [for (final m in methods) DropdownMenuItem(value: m, child: Text(m))],
+                      onChanged: (value) {
+                        if (value != null) setLocal(() => method = value);
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: reason,
+                      decoration: const InputDecoration(labelText: 'Reason (optional)'),
+                    ),
+                    const SizedBox(height: 8),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Restore recipe stock'),
+                      subtitle: Text(isFull ? 'Returns ingredients to inventory on full refund' : 'Only applies when refund clears the remaining balance'),
+                      value: restoreStock && isFull,
+                      onChanged: isFull ? (value) => setLocal(() => restoreStock = value ?? true) : null,
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Back')),
+                FilledButton(
+                  style: adminPrimaryButtonStyle,
+                  onPressed: parsed <= Decimal.zero || parsed > remaining
+                      ? null
+                      : () => Navigator.pop(context, true),
+                  child: const Text('Process refund'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (ok != true || !mounted) return;
+    try {
+      final parsedAmount = parseMoneyInputOrThrow(amount.text, label: 'Refund amount');
+      final isFull = parsedAmount >= remaining;
+      final result = await sl<OrderRepository>().refundOrder(
+        orderId: readString(row, ['id']),
+        amount: moneyString(parsedAmount),
+        method: method,
+        reason: reason.text.trim(),
+        restoreStock: isFull && restoreStock,
+      );
+      await _load();
+      if (!mounted) return;
+      final lastRefund = result['last_refund'];
+      final note = lastRefund is Map ? readString(asStringKeyMap(lastRefund), ['stock_note']) : '';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(note.isEmpty ? 'Refund recorded.' : 'Refund recorded. $note'),
+        ),
+      );
+    } on Failure catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+    }
   }
 }
 
