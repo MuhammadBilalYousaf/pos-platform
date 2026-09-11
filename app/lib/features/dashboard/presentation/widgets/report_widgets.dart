@@ -154,10 +154,22 @@ class ReportSalesLineChart extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (days.isEmpty) return const Center(child: Text('No sales in this range'));
+    final hasSales = days.any((d) => d.sales > Decimal.zero);
+    if (!hasSales) {
+      return const Center(child: Text('No sales in this range'));
+    }
     final maxY = days.fold<double>(0, (m, d) => d.sales.toDouble() > m ? d.sales.toDouble() : m);
     final spots = <FlSpot>[
       for (var i = 0; i < days.length; i++) FlSpot(i.toDouble(), days[i].sales.toDouble()),
     ];
+    final showDots = days.length <= 3;
+    // One day cannot draw a line — use a single bar instead.
+    if (days.length == 1) {
+      return ReportBarChart(
+        values: [days.first.sales.toDouble()],
+        labels: [DateFormat('d MMM').format(days.first.date)],
+      );
+    }
     return LineChart(
       LineChartData(
         minY: 0,
@@ -203,20 +215,21 @@ class ReportSalesLineChart extends StatelessWidget {
           touchTooltipData: LineTouchTooltipData(
             getTooltipItems: (touched) => [
               for (final t in touched)
-                LineTooltipItem(
-                  '${DateFormat('MMM d').format(days[t.x.toInt()].date)}\n${formatRs(Decimal.parse(t.y.toString()))}',
-                  const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 12),
-                ),
+                if (t.x.toInt() >= 0 && t.x.toInt() < days.length)
+                  LineTooltipItem(
+                    '${DateFormat('MMM d').format(days[t.x.toInt()].date)}\n${formatRs(Decimal.parse(t.y.toStringAsFixed(2)))}',
+                    const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 12),
+                  ),
             ],
           ),
         ),
         lineBarsData: [
           LineChartBarData(
             spots: spots,
-            isCurved: true,
+            isCurved: days.length > 2,
             color: kReportAccent,
             barWidth: 3,
-            dotData: const FlDotData(show: false),
+            dotData: FlDotData(show: showDots),
             belowBarData: BarAreaData(
               show: true,
               gradient: LinearGradient(
@@ -241,20 +254,27 @@ class ReportBarChart extends StatelessWidget {
     required this.values,
     required this.labels,
     this.highlightMax = true,
+    this.scrollable = false,
+    this.barWidth = 14,
+    this.minBarSlotWidth = 48,
   });
 
   final List<double> values;
   final List<String> labels;
   final bool highlightMax;
+  final bool scrollable;
+  final double barWidth;
+  final double minBarSlotWidth;
 
   @override
   Widget build(BuildContext context) {
     if (values.isEmpty) return const Center(child: Text('No data'));
     final maxY = values.fold<double>(0, (m, v) => v > m ? v : m);
     final peak = maxY;
-    return BarChart(
+    final chart = BarChart(
       BarChartData(
         maxY: maxY == 0 ? 1 : maxY * 1.2,
+        alignment: BarChartAlignment.spaceAround,
         gridData: FlGridData(
           show: true,
           drawVerticalLine: false,
@@ -277,11 +297,13 @@ class ReportBarChart extends StatelessWidget {
           bottomTitles: AxisTitles(
             sideTitles: SideTitles(
               showTitles: true,
-              getTitlesWidget: (v, _) {
+              reservedSize: 28,
+              getTitlesWidget: (v, meta) {
                 final i = v.toInt();
                 if (i < 0 || i >= labels.length) return const SizedBox.shrink();
-                return Padding(
-                  padding: const EdgeInsets.only(top: 6),
+                if (i.toDouble() != v && (v - i).abs() > 0.01) return const SizedBox.shrink();
+                return SideTitleWidget(
+                  meta: meta,
                   child: Text(labels[i], style: const TextStyle(fontSize: 10, color: kReportMuted)),
                 );
               },
@@ -295,7 +317,7 @@ class ReportBarChart extends StatelessWidget {
               barRods: [
                 BarChartRodData(
                   toY: values[i],
-                  width: 14,
+                  width: barWidth,
                   borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
                   color: highlightMax && values[i] == peak && peak > 0
                       ? kReportAccent
@@ -305,6 +327,95 @@ class ReportBarChart extends StatelessWidget {
             ),
         ],
       ),
+    );
+
+    if (!scrollable) return chart;
+    return _HorizontallyScrollableChart(
+      barCount: values.length,
+      minBarSlotWidth: minBarSlotWidth,
+      child: chart,
+    );
+  }
+}
+
+class _HorizontallyScrollableChart extends StatefulWidget {
+  const _HorizontallyScrollableChart({
+    required this.child,
+    required this.barCount,
+    required this.minBarSlotWidth,
+  });
+
+  final Widget child;
+  final int barCount;
+  final double minBarSlotWidth;
+
+  @override
+  State<_HorizontallyScrollableChart> createState() => _HorizontallyScrollableChartState();
+}
+
+class _HorizontallyScrollableChartState extends State<_HorizontallyScrollableChart> {
+  final ScrollController _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final viewportWidth = constraints.maxWidth.isFinite && constraints.maxWidth > 0
+            ? constraints.maxWidth
+            : 360.0;
+        final contentWidth = widget.barCount * widget.minBarSlotWidth + 56;
+        final width = contentWidth < viewportWidth ? viewportWidth : contentWidth;
+        final viewportHeight = constraints.maxHeight.isFinite && constraints.maxHeight > 0
+            ? constraints.maxHeight
+            : 220.0;
+        final overflows = width > viewportWidth + 0.5;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: RawScrollbar(
+                controller: _controller,
+                thumbVisibility: overflows,
+                trackVisibility: overflows,
+                thickness: 8,
+                radius: const Radius.circular(8),
+                thumbColor: kReportAccent.withValues(alpha: 0.55),
+                trackColor: kReportAccentSoft,
+                trackBorderColor: kReportCardBorder,
+                padding: const EdgeInsets.only(bottom: 2),
+                child: SingleChildScrollView(
+                  controller: _controller,
+                  scrollDirection: Axis.horizontal,
+                  child: SizedBox(
+                    width: width,
+                    height: viewportHeight - (overflows ? 18 : 0),
+                    child: Padding(
+                      padding: EdgeInsets.only(bottom: overflows ? 10 : 0),
+                      child: widget.child,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            if (overflows)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  'Scroll horizontally to see all hours →',
+                  textAlign: TextAlign.right,
+                  style: TextStyle(fontSize: 10, color: kReportMuted.withValues(alpha: 0.9)),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }

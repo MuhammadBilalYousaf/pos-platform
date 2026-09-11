@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/widgets/workbench.dart';
+import '../../../../core/widgets/admin_ui_kit.dart';
 import '../../../products/domain/entities/catalog.dart';
 import '../../../products/presentation/bloc/catalog_cubit.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -12,12 +13,20 @@ class CatalogAdminPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return PageFrame(
-      title: 'Catalog',
-      subtitle: 'Categories, variants, and add-ons belong to this business. Inactive items stay off the POS grid.',
+      title: 'Products',
+      subtitle: 'Manage your menu items, categories, variants, and add-ons.',
       actions: [
-        OutlinedButton(onPressed: () => _addCategory(context), child: const Text('Add category')),
+        OutlinedButton(
+          style: adminOutlinedButtonStyle,
+          onPressed: () => _addCategory(context),
+          child: const Text('Add category'),
+        ),
         const SizedBox(width: 8),
-        FilledButton(onPressed: () => _addProduct(context), child: const Text('Add product')),
+        FilledButton(
+          style: adminPrimaryButtonStyle,
+          onPressed: () => _addProduct(context),
+          child: const Text('+ Add Product'),
+        ),
       ],
       child: BlocBuilder<CatalogCubit, CatalogState>(
         builder: (context, state) {
@@ -31,52 +40,79 @@ class CatalogAdminPage extends StatelessWidget {
           if (catalog == null || (catalog.categories.isEmpty && catalog.products.isEmpty)) {
             return const Center(child: Text('No products yet. Add a category, then a product.'));
           }
-          return ListView(
-            children: [
-              Text('Categories', style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final category in catalog.categories)
-                    InputChip(
-                      label: Text(category.name),
-                      onDeleted: () async {
-                        await sl<AdminRepository>().deleteCategory(category.id);
-                        if (context.mounted) context.read<CatalogCubit>().load(forceRefresh: true);
-                      },
-                    ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              Text('Products', style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
-              for (final product in catalog.products)
-                Card(
-                  child: ListTile(
-                    title: Text(product.name),
-                    subtitle: Text(
-                      [
-                        product.sku ?? product.id,
-                        product.defaultOrFirstPrice,
-                        product.productType,
-                        if (!product.active) 'inactive',
-                        if (product.variants.length > 1) '${product.variants.length} variants',
-                        if (product.options.isNotEmpty) '${product.options.length} add-ons',
-                      ].join(' · '),
-                    ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete_outline),
-                      onPressed: () async {
-                        await sl<AdminRepository>().deleteProduct(product.id);
-                        if (context.mounted) context.read<CatalogCubit>().load(forceRefresh: true);
-                      },
-                    ),
-                    onTap: () => _addProduct(context, product: product),
+          return AdminSurfaceCard(
+            padding: EdgeInsets.zero,
+            child: Column(
+              children: [
+                const AdminTableHeader(columns: ['Product', 'Category', 'Price', 'Status', '']),
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: catalog.products.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1, color: kAdminBorder),
+                    itemBuilder: (context, index) {
+                      final product = catalog.products[index];
+                      String? categoryName;
+                      for (final c in catalog.categories) {
+                        if (c.id == product.categoryId) {
+                          categoryName = c.name;
+                          break;
+                        }
+                      }
+                      return InkWell(
+                        onTap: () => _addProduct(context, product: product),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                flex: 2,
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      width: 36,
+                                      height: 36,
+                                      decoration: BoxDecoration(
+                                        color: kAdminAccentSoft,
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: const Icon(Icons.icecream_outlined, color: kAdminAccent, size: 18),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(product.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Expanded(child: Text(categoryName ?? '—')),
+                              Expanded(child: Text('Rs. ${product.defaultOrFirstPrice}')),
+                              Expanded(
+                                child: AdminStatusPill(
+                                  label: product.active ? 'Active' : 'Inactive',
+                                  tone: product.active ? AdminStatusTone.success : AdminStatusTone.neutral,
+                                ),
+                              ),
+                              Expanded(
+                                child: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: IconButton(
+                                    icon: const Icon(Icons.delete_outline, size: 20),
+                                    onPressed: () async {
+                                      await sl<AdminRepository>().deleteProduct(product.id);
+                                      if (context.mounted) context.read<CatalogCubit>().load(forceRefresh: true);
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
-            ],
+              ],
+            ),
           );
         },
       ),

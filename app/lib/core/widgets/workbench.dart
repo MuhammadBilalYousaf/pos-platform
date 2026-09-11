@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'admin_ui_kit.dart';
 
 class WorkbenchDestination {
   const WorkbenchDestination({
@@ -97,31 +98,41 @@ class PageFrame extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title, style: Theme.of(context).textTheme.headlineSmall),
-                    if (subtitle != null) ...[
-                      const SizedBox(height: 4),
-                      Text(subtitle!, style: Theme.of(context).textTheme.bodyMedium),
+    return ColoredBox(
+      color: kAdminPageBg,
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                              fontWeight: FontWeight.w800,
+                              color: const Color(0xFF0F172A),
+                            ),
+                      ),
+                      if (subtitle != null) ...[
+                        const SizedBox(height: 6),
+                        Text(subtitle!, style: const TextStyle(color: kAdminMuted, fontSize: 14)),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
-              ),
-              ...actions,
-            ],
-          ),
-          const SizedBox(height: 20),
-          Expanded(child: child),
-        ],
+                ...actions,
+              ],
+            ),
+            const SizedBox(height: 20),
+            Expanded(child: child),
+          ],
+        ),
       ),
     );
   }

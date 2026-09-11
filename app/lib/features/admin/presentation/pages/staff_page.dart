@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/widgets/workbench.dart';
+import '../../../../core/widgets/admin_ui_kit.dart';
 import '../../../auth/domain/entities/session.dart';
 import '../../../auth/domain/permissions.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
@@ -157,49 +158,83 @@ class _StaffPageState extends State<StaffPage> {
 
   @override
   Widget build(BuildContext context) {
-    final managers = _rows.where((row) => row.role == PosRole.branchManager).toList();
-    final employees = _rows.where((row) => row.role == PosRole.cashier).toList();
-    final admins = _rows.where((row) => row.role == PosRole.businessAdmin).toList();
     return BlocListener<BranchContextCubit, BranchContextState>(
       listener: (_, __) {
         if (widget.fixedBranchId == null) _load();
       },
       child: PageFrame(
         title: 'Staff',
-        subtitle: 'Managers and employees belong to this business. The branch selector filters this list.',
+        subtitle: 'Manage your team members, roles, and branch assignments.',
         actions: [
-          FilledButton.icon(onPressed: () => _edit(), icon: const Icon(Icons.person_add_outlined), label: const Text('Invite')),
+          FilledButton.icon(
+            style: adminPrimaryButtonStyle,
+            onPressed: () => _edit(),
+            icon: const Icon(Icons.person_add_outlined, size: 18),
+            label: const Text('+ Add Staff'),
+          ),
         ],
         child: _loading
-            ? const Center(child: CircularProgressIndicator())
+            ? const Center(child: CircularProgressIndicator(color: kAdminAccent))
             : _error != null
                 ? Center(child: Text(_error!))
-                : ListView(
-                    children: [
-                      if (admins.isNotEmpty) ...[
-                        Text('Business admins', style: Theme.of(context).textTheme.titleMedium),
-                        for (final row in admins) _tile(row),
-                        const SizedBox(height: 16),
+                : AdminSurfaceCard(
+                    padding: EdgeInsets.zero,
+                    child: Column(
+                      children: [
+                        const AdminTableHeader(columns: ['Name', 'Role', 'Branch', 'Status', '']),
+                        Expanded(
+                          child: ListView.separated(
+                            itemCount: _rows.length,
+                            separatorBuilder: (_, __) => const Divider(height: 1, color: kAdminBorder),
+                            itemBuilder: (context, index) {
+                              final row = _rows[index];
+                              return InkWell(
+                                onTap: () => _edit(member: row),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        flex: 2,
+                                        child: Row(
+                                          children: [
+                                            CircleAvatar(
+                                              radius: 16,
+                                              backgroundColor: kAdminAccentSoft,
+                                              child: Text(
+                                                row.name.isEmpty ? '?' : row.name.substring(0, 1).toUpperCase(),
+                                                style: const TextStyle(color: kAdminAccent, fontWeight: FontWeight.w800),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 10),
+                                            Expanded(child: Text(row.name, style: const TextStyle(fontWeight: FontWeight.w600))),
+                                          ],
+                                        ),
+                                      ),
+                                      Expanded(child: Text(PosRole.label(row.role))),
+                                      Expanded(child: Text(_branchName(row))),
+                                      Expanded(
+                                        child: AdminStatusPill(
+                                          label: row.active ? 'Active' : 'Inactive',
+                                          tone: row.active ? AdminStatusTone.success : AdminStatusTone.neutral,
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: Align(
+                                          alignment: Alignment.centerRight,
+                                          child: IconButton(onPressed: () => _edit(member: row), icon: const Icon(Icons.edit_outlined, size: 20)),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
                       ],
-                      Text('Managers', style: Theme.of(context).textTheme.titleMedium),
-                      if (managers.isEmpty) const ListTile(title: Text('None')),
-                      for (final row in managers) _tile(row),
-                      const SizedBox(height: 16),
-                      Text('Employees', style: Theme.of(context).textTheme.titleMedium),
-                      if (employees.isEmpty) const ListTile(title: Text('None')),
-                      for (final row in employees) _tile(row),
-                    ],
+                    ),
                   ),
-      ),
-    );
-  }
-
-  Widget _tile(StaffMember row) {
-    return Card(
-      child: ListTile(
-        title: Text(row.name),
-        subtitle: Text('${row.email} · ${PosRole.label(row.role)} · ${_branchName(row)}${row.active ? '' : ' · inactive'}'),
-        onTap: () => _edit(member: row),
       ),
     );
   }

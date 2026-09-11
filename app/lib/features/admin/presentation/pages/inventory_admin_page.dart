@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/widgets/workbench.dart';
+import '../../../../core/widgets/admin_ui_kit.dart';
 import '../../data/admin_repository.dart';
 import '../bloc/branch_context_cubit.dart';
 
@@ -122,45 +123,49 @@ class _InventoryAdminPageState extends State<InventoryAdminPage> {
   @override
   Widget build(BuildContext context) {
     final body = _loading
-        ? const Center(child: CircularProgressIndicator())
+        ? const Center(child: CircularProgressIndicator(color: kAdminAccent))
         : _error != null
             ? Center(child: Text(_error!))
-            : ListView(
+            : Column(
                 children: [
-                  if (!widget.embedded) ...[
-                    Text('On hand', style: Theme.of(context).textTheme.titleMedium),
-                    const SizedBox(height: 8),
-                  ],
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: FilledButton.icon(onPressed: _add, icon: const Icon(Icons.add), label: const Text('Item')),
-                  ),
-                  for (final row in _rows)
-                    Card(
-                      child: ListTile(
-                        title: Text(row.name),
-                        subtitle: Text('Qty ${row.quantity} · reorder ${row.reorderLevel}${row.sku == null ? '' : ' · ${row.sku}'}'),
-                        trailing: TextButton(onPressed: () => _adjust(row), child: const Text('Adjust')),
+                  if (!widget.embedded)
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: FilledButton.icon(
+                        style: adminPrimaryButtonStyle,
+                        onPressed: _add,
+                        icon: const Icon(Icons.add, size: 18),
+                        label: const Text('Add Stock'),
                       ),
                     ),
-                  const SizedBox(height: 24),
-                  Text('Stock history', style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 8),
-                  if (_history.isEmpty)
-                    const Text('No stock movements yet.')
-                  else
-                    for (final row in _history)
-                      ListTile(
-                        title: Text('${row.type} · ${row.quantity}'),
-                        subtitle: Text(
-                          [
-                            row.ingredientId ?? row.inventoryId ?? '',
-                            if (row.reason != null && row.reason!.isNotEmpty) row.reason!,
-                            if (row.orderId != null) 'order ${row.orderId}',
-                            row.createdAt.toLocal().toString(),
-                          ].where((item) => item.isNotEmpty).join(' · '),
-                        ),
-                      ),
+                  if (!widget.embedded) const SizedBox(height: 12),
+                  Expanded(
+                    child: widget.embedded
+                        ? _stockTable(flex: true)
+                        : ListView(
+                            children: [
+                              _stockTable(flex: false),
+                              const SizedBox(height: 24),
+                              Text('Stock history', style: Theme.of(context).textTheme.titleMedium),
+                              const SizedBox(height: 8),
+                              if (_history.isEmpty)
+                                const Text('No stock movements yet.')
+                              else
+                                for (final row in _history)
+                                  ListTile(
+                                    title: Text('${row.type} · ${row.quantity}'),
+                                    subtitle: Text(
+                                      [
+                                        row.ingredientId ?? row.inventoryId ?? '',
+                                        if (row.reason != null && row.reason!.isNotEmpty) row.reason!,
+                                        if (row.orderId != null) 'order ${row.orderId}',
+                                        row.createdAt.toLocal().toString(),
+                                      ].where((item) => item.isNotEmpty).join(' · '),
+                                    ),
+                                  ),
+                            ],
+                          ),
+                  ),
                 ],
               );
     final framed = widget.embedded
@@ -173,6 +178,70 @@ class _InventoryAdminPageState extends State<InventoryAdminPage> {
     return BlocListener<BranchContextCubit, BranchContextState>(
       listener: (_, __) => _load(),
       child: framed,
+    );
+  }
+
+  Widget _stockTable({required bool flex}) {
+    if (_rows.isEmpty) {
+      return const Center(child: Text('No stock items yet. Add ingredients to track inventory.'));
+    }
+    final list = ListView.separated(
+      shrinkWrap: !flex,
+      physics: flex ? null : const NeverScrollableScrollPhysics(),
+      itemCount: _rows.length,
+      separatorBuilder: (_, __) => const Divider(height: 1, color: kAdminBorder),
+      itemBuilder: (context, index) {
+        final row = _rows[index];
+        final qty = double.tryParse(row.quantity.replaceAll(',', '')) ?? 0;
+        final reorder = double.tryParse(row.reorderLevel.replaceAll(',', '')) ?? 0;
+        final low = qty <= reorder;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              Expanded(child: Text('${index + 1}', style: const TextStyle(color: kAdminMuted))),
+              Expanded(
+                flex: 3,
+                child: Row(
+                  children: [
+                    Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(color: kAdminAccentSoft, borderRadius: BorderRadius.circular(8)),
+                      child: const Icon(Icons.inventory_2_outlined, size: 18, color: kAdminAccent),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text(row.name, style: const TextStyle(fontWeight: FontWeight.w600))),
+                  ],
+                ),
+              ),
+              Expanded(flex: 2, child: Text(row.sku ?? 'General', maxLines: 1, overflow: TextOverflow.ellipsis)),
+              Expanded(child: const Text('PCS', style: TextStyle(fontSize: 12))),
+              Expanded(child: Text(row.quantity, style: const TextStyle(fontWeight: FontWeight.w600))),
+              Expanded(child: Text(row.reorderLevel, style: const TextStyle(fontSize: 12))),
+              Expanded(
+                flex: 2,
+                child: AdminStatusPill(
+                  label: low ? 'Low Stock' : 'In Stock',
+                  tone: low ? AdminStatusTone.danger : AdminStatusTone.success,
+                ),
+              ),
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: IconButton(onPressed: () => _adjust(row), icon: const Icon(Icons.tune, size: 20)),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    return Column(
+      children: [
+        const AdminTableHeader(columns: ['#', 'Item', 'Category', 'Unit', 'Current Stock', 'Min. Stock', 'Status', '']),
+        if (flex) Expanded(child: list) else list,
+      ],
     );
   }
 }

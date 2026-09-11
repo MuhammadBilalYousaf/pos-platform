@@ -52,11 +52,15 @@ class CatalogState extends Equatable {
 
   List<CatalogProduct> get visibleProducts {
     final items = catalog?.products ?? const <CatalogProduct>[];
+    final q = query.trim().toLowerCase();
+    final searchActive = q.isNotEmpty;
     return items.where((product) {
-      final matchesCategory = selectedCategoryId == null || product.categoryId == selectedCategoryId;
-      final matchesQuery = query.isEmpty ||
-          product.name.toLowerCase().contains(query.toLowerCase()) ||
-          (product.sku ?? '').toLowerCase().contains(query.toLowerCase());
+      final matchesQuery = !searchActive ||
+          product.name.toLowerCase().contains(q) ||
+          (product.sku ?? '').toLowerCase().contains(q);
+      final matchesCategory = searchActive ||
+          selectedCategoryId == null ||
+          product.categoryId == selectedCategoryId;
       return product.active && matchesCategory && matchesQuery && product.variants.isNotEmpty;
     }).toList();
   }

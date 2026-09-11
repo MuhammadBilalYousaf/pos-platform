@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/widgets/workbench.dart';
+import '../../../../core/widgets/admin_ui_kit.dart';
 import '../../../auth/domain/entities/session.dart';
-import '../../../auth/domain/permissions.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/admin_repository.dart';
 
@@ -64,49 +64,104 @@ class _SettingsEditorPageState extends State<SettingsEditorPage> {
 
   @override
   Widget build(BuildContext context) {
-    final user = context.watch<AuthBloc>().state;
-    final session = user is AuthAuthenticated ? user.session : widget.session;
     return PageFrame(
       title: 'Settings',
-      subtitle: '${session.user.name} · ${PosRole.label(session.user.role)}',
-      child: ListView(
+      subtitle: 'Configure your business settings, tax, currency, and catalog helpers.',
+      actions: [
+        FilledButton(
+          style: adminPrimaryButtonStyle,
+          onPressed: _busy ? null : _save,
+          child: Text(_busy ? 'Saving…' : 'Save Changes'),
+        ),
+      ],
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          TextField(controller: _name, decoration: const InputDecoration(labelText: 'Business name')),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(child: TextField(controller: _currency, decoration: const InputDecoration(labelText: 'Currency'))),
-              const SizedBox(width: 12),
-              Expanded(child: TextField(controller: _tax, decoration: const InputDecoration(labelText: 'Tax rate'))),
-            ],
+          SizedBox(
+            width: 220,
+            child: AdminSurfaceCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: const [
+                  _SettingsNavItem(label: 'Business Profile', selected: true),
+                  _SettingsNavItem(label: 'Tax & Currency'),
+                  _SettingsNavItem(label: 'Receipt Settings'),
+                  _SettingsNavItem(label: 'Discounts & Units'),
+                  _SettingsNavItem(label: 'Audit Log'),
+                ],
+              ),
+            ),
           ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(child: TextField(controller: _primary, decoration: const InputDecoration(labelText: 'Primary color'))),
-              const SizedBox(width: 12),
-              Expanded(child: TextField(controller: _secondary, decoration: const InputDecoration(labelText: 'Secondary color'))),
-            ],
+          const SizedBox(width: 16),
+          Expanded(
+            child: AdminSurfaceCard(
+              child: ListView(
+                children: [
+                  Text('Business Profile', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 16),
+                  TextField(controller: _name, decoration: adminInputDecoration('Business name')),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(child: TextField(controller: _currency, decoration: adminInputDecoration('Currency'))),
+                      const SizedBox(width: 12),
+                      Expanded(child: TextField(controller: _tax, decoration: adminInputDecoration('Tax rate'))),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(child: TextField(controller: _primary, decoration: adminInputDecoration('Primary color'))),
+                      const SizedBox(width: 12),
+                      Expanded(child: TextField(controller: _secondary, decoration: adminInputDecoration('Secondary color'))),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(controller: _address, decoration: adminInputDecoration('Address')),
+                  const SizedBox(height: 12),
+                  TextField(controller: _phone, decoration: adminInputDecoration('Phone')),
+                  const SizedBox(height: 24),
+                  const Text('Receipt header, footer, and paper size are edited under Receipt in the sidebar.'),
+                  const SizedBox(height: 24),
+                  Text('Discounts', style: Theme.of(context).textTheme.titleMedium),
+                  const _NamedList(collection: 'discounts', extraLabel: 'Amount'),
+                  const SizedBox(height: 16),
+                  Text('Units', style: Theme.of(context).textTheme.titleMedium),
+                  const _NamedList(collection: 'units', extraLabel: 'Code'),
+                  const SizedBox(height: 16),
+                  Text('Audit', style: Theme.of(context).textTheme.titleMedium),
+                  _AuditList(),
+                ],
+              ),
+            ),
           ),
-          const SizedBox(height: 12),
-          TextField(controller: _address, decoration: const InputDecoration(labelText: 'Address')),
-          const SizedBox(height: 12),
-          TextField(controller: _phone, decoration: const InputDecoration(labelText: 'Phone')),
-          const SizedBox(height: 20),
-          FilledButton(onPressed: _busy ? null : _save, child: Text(_busy ? 'Saving…' : 'Save settings')),
-          const SizedBox(height: 8),
-          const Text('Receipt header, footer, and paper size are edited under Receipt.'),
-          const SizedBox(height: 24),
-          Text('Discounts', style: Theme.of(context).textTheme.titleMedium),
-          const Text('Named discounts cashiers can apply as an order discount amount.'),
-          const _NamedList(collection: 'discounts', extraLabel: 'Amount'),
-          const SizedBox(height: 16),
-          Text('Units', style: Theme.of(context).textTheme.titleMedium),
-          const _NamedList(collection: 'units', extraLabel: 'Code'),
-          const SizedBox(height: 16),
-          Text('Audit', style: Theme.of(context).textTheme.titleMedium),
-          _AuditList(),
         ],
+      ),
+    );
+  }
+}
+
+class _SettingsNavItem extends StatelessWidget {
+  const _SettingsNavItem({required this.label, this.selected = false});
+  final String label;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: selected ? kAdminAccentSoft : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        border: selected ? Border.all(color: kAdminAccent.withValues(alpha: 0.25)) : null,
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+          color: selected ? kAdminAccent : const Color(0xFF334155),
+        ),
       ),
     );
   }

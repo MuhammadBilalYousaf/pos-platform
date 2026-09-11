@@ -4,6 +4,8 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/utils/json_read.dart';
 import '../../../../core/widgets/workbench.dart';
+import '../../../../core/widgets/admin_ui_kit.dart';
+import 'package:intl/intl.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../auth/domain/permissions.dart';
 import '../../../orders/data/repositories/order_repository.dart';
@@ -18,16 +20,39 @@ class OrdersPage extends StatefulWidget {
   State<OrdersPage> createState() => _OrdersPageState();
 }
 
-class _OrdersPageState extends State<OrdersPage> {
+class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateMixin {
   List<Map<String, dynamic>> _rows = const [];
   String _query = '';
+  String _statusFilter = 'ALL';
   String? _error;
   bool _loading = true;
+  late final TabController _tabs;
 
   @override
   void initState() {
     super.initState();
+    _tabs = TabController(length: 6, vsync: this);
+    _tabs.addListener(() {
+      if (!_tabs.indexIsChanging) {
+        setState(() {
+          _statusFilter = switch (_tabs.index) {
+            1 => 'COMPLETED',
+            2 => 'PENDING',
+            3 => 'HELD',
+            4 => 'CANCELLED',
+            5 => 'REFUNDED',
+            _ => 'ALL',
+          };
+        });
+      }
+    });
     _load();
+  }
+
+  @override
+  void dispose() {
+    _tabs.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -51,49 +76,112 @@ class _OrdersPageState extends State<OrdersPage> {
   @override
   Widget build(BuildContext context) {
     final visible = _rows.where((row) {
+      final status = readString(row, ['status'], 'COMPLETED').toUpperCase();
+      if (_statusFilter == 'COMPLETED' && status != 'COMPLETED') return false;
+      if (_statusFilter == 'CANCELLED' && status != 'CANCELLED') return false;
+      if (_statusFilter == 'PENDING' && status != 'PENDING' && status != 'OPEN') return false;
+      if (_statusFilter == 'HELD' && status != 'HELD' && status != 'ON_HOLD') return false;
+      if (_statusFilter == 'REFUNDED' && status != 'REFUNDED') return false;
       if (_query.isEmpty) return true;
       final hay = '${row['order_number']} ${row['customer_name']} ${row['total']} ${row['order_type']} ${row['cashier_name']}'.toLowerCase();
       return hay.contains(_query.toLowerCase());
     }).toList();
+
     return BlocListener<BranchContextCubit, BranchContextState>(
       listener: (_, __) => _load(),
       child: PageFrame(
-      title: 'Orders',
-      subtitle: 'Completed tickets for this business. Open one to reprint the receipt preview.',
-      actions: [IconButton(onPressed: _load, icon: const Icon(Icons.refresh))],
-      child: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(child: Text(_error!))
-              : Column(
-                  children: [
-                    TextField(
-                      decoration: const InputDecoration(prefixIcon: Icon(Icons.search), hintText: 'Search order, customer, type'),
-                      onChanged: (value) => setState(() => _query = value),
-                    ),
-                    const SizedBox(height: 12),
-                    Expanded(
-                      child: visible.isEmpty
-                          ? const Center(child: Text('No orders yet.'))
-                          : ListView.builder(
-                              itemCount: visible.length,
-                              itemBuilder: (context, index) {
-                                final row = visible[index];
-                                return Card(
-                                  child: ListTile(
-                                    title: Text(readString(row, ['order_number'])),
-                                    subtitle: Text(
-                                      '${readString(row, ['order_type'], 'TAKEAWAY')} · ${readString(row, ['customer_name'], 'Walk-in')} · ${readString(row, ['status'])}',
+        title: 'Orders',
+        subtitle: 'Manage and track all orders across your branches.',
+        actions: [
+          IconButton(onPressed: _load, icon: const Icon(Icons.refresh_rounded)),
+        ],
+        child: _loading
+            ? const Center(child: CircularProgressIndicator(color: kAdminAccent))
+            : _error != null
+                ? Center(child: Text(_error!))
+                : Column(
+                    children: [
+                      TabBar(
+                        controller: _tabs,
+                        isScrollable: true,
+                        labelColor: kAdminAccent,
+                        unselectedLabelColor: kAdminMuted,
+                        indicatorColor: kAdminAccent,
+                        tabs: const [
+                          Tab(text: 'All Orders'),
+                          Tab(text: 'Completed'),
+                          Tab(text: 'Pending'),
+                          Tab(text: 'Held'),
+                          Tab(text: 'Cancelled'),
+                          Tab(text: 'Refunded'),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        decoration: adminInputDecoration('Search order, customer, type', icon: Icons.search),
+                        onChanged: (value) => setState(() => _query = value),
+                      ),
+                      const SizedBox(height: 12),
+                      Expanded(
+                        child: AdminSurfaceCard(
+                          padding: EdgeInsets.zero,
+                          child: visible.isEmpty
+                              ? const Center(child: Text('No orders in this view.'))
+                              : Column(
+                                  children: [
+                                    const AdminTableHeader(columns: ['Order', 'Date & Time', 'Customer', 'Branch', 'Total', 'Status', '']),
+                                    Expanded(
+                                      child: ListView.separated(
+                                        itemCount: visible.length,
+                                        separatorBuilder: (_, __) => const Divider(height: 1, color: kAdminBorder),
+                                        itemBuilder: (context, index) {
+                                          final row = visible[index];
+                                          final status = readString(row, ['status'], 'COMPLETED');
+                                          final created = row['created_at'];
+                                          var timeLabel = '—';
+                                          if (created is Timestamp) {
+                                            timeLabel = DateFormat('MMM d, h:mm a').format(created.toDate());
+                                          }
+                                          final tone = switch (status.toUpperCase()) {
+                                            'COMPLETED' => AdminStatusTone.success,
+                                            'CANCELLED' || 'REFUNDED' => AdminStatusTone.danger,
+                                            'PENDING' || 'OPEN' || 'HELD' || 'ON_HOLD' => AdminStatusTone.warning,
+                                            _ => AdminStatusTone.neutral,
+                                          };
+                                          return InkWell(
+                                            onTap: () => _open(row),
+                                            child: Padding(
+                                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                              child: Row(
+                                                children: [
+                                                  Expanded(
+                                                    flex: 2,
+                                                    child: Text('#${readString(row, ['order_number'])}', style: const TextStyle(fontWeight: FontWeight.w700)),
+                                                  ),
+                                                  Expanded(child: Text(timeLabel, style: const TextStyle(fontSize: 12))),
+                                                  Expanded(child: Text(readString(row, ['customer_name'], 'Walk-in'), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                                                  Expanded(child: Text(readString(row, ['branch_id', 'branchId']), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                                                  Expanded(child: Text('Rs. ${readString(row, ['total'])}', style: const TextStyle(fontWeight: FontWeight.w600))),
+                                                  Expanded(child: AdminStatusPill(label: status, tone: tone)),
+                                                  Expanded(
+                                                    child: Align(
+                                                      alignment: Alignment.centerRight,
+                                                      child: IconButton(onPressed: () => _open(row), icon: const Icon(Icons.visibility_outlined, size: 20)),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
                                     ),
-                                    trailing: Text(readString(row, ['total'])),
-                                    onTap: () => _open(row),
-                                  ),
-                                );
-                              },
-                            ),
-                    ),
-                  ],
-                ),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ],
+                  ),
       ),
     );
   }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/widgets/workbench.dart';
+import '../../../../core/widgets/admin_ui_kit.dart';
 import '../../data/admin_repository.dart';
 
 class CustomersPage extends StatefulWidget {
@@ -14,6 +15,7 @@ class _CustomersPageState extends State<CustomersPage> {
   List<PosCustomer> _rows = const [];
   String? _error;
   bool _loading = true;
+  String _query = '';
 
   @override
   void initState() {
@@ -69,25 +71,72 @@ class _CustomersPageState extends State<CustomersPage> {
 
   @override
   Widget build(BuildContext context) {
+    final visible = _rows.where((row) {
+      if (_query.isEmpty) return true;
+      final hay = '${row.name} ${row.phone} ${row.note}'.toLowerCase();
+      return hay.contains(_query.toLowerCase());
+    }).toList();
+
     return PageFrame(
       title: 'Customers',
-      subtitle: 'Saved guests for takeaway and delivery tickets. Use the name on POS ticket details.',
-      actions: [FilledButton.icon(onPressed: _add, icon: const Icon(Icons.person_add_outlined), label: const Text('Customer'))],
+      subtitle: 'Saved guests for takeaway and delivery tickets.',
+      actions: [
+        FilledButton.icon(
+          style: adminPrimaryButtonStyle,
+          onPressed: _add,
+          icon: const Icon(Icons.person_add_outlined, size: 18),
+          label: const Text('Add Customer'),
+        ),
+      ],
       child: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(child: CircularProgressIndicator(color: kAdminAccent))
           : _error != null
               ? Center(child: Text(_error!))
-              : _rows.isEmpty
-                  ? const Center(child: Text('No customers yet. Add a guest or save one from POS ticket details.'))
-                  : ListView(
+              : Column(
                   children: [
-                    for (final row in _rows)
-                      Card(
-                        child: ListTile(
-                          title: Text(row.name),
-                          subtitle: Text([row.phone, row.note].where((item) => item != null && item.isNotEmpty).join(' · ')),
-                        ),
+                    TextField(
+                      decoration: adminInputDecoration('Search customers', icon: Icons.search),
+                      onChanged: (value) => setState(() => _query = value),
+                    ),
+                    const SizedBox(height: 12),
+                    Expanded(
+                      child: AdminSurfaceCard(
+                        padding: EdgeInsets.zero,
+                        child: visible.isEmpty
+                            ? const Center(child: Text('No customers yet.'))
+                            : Column(
+                                children: [
+                                  const AdminTableHeader(columns: ['#', 'Name', 'Phone', 'Notes', '']),
+                                  Expanded(
+                                    child: ListView.separated(
+                                      itemCount: visible.length,
+                                      separatorBuilder: (_, __) => const Divider(height: 1, color: kAdminBorder),
+                                      itemBuilder: (context, index) {
+                                        final row = visible[index];
+                                        return Padding(
+                                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                          child: Row(
+                                            children: [
+                                              Expanded(child: Text('${index + 1}', style: const TextStyle(color: kAdminMuted))),
+                                              Expanded(flex: 2, child: Text(row.name, style: const TextStyle(fontWeight: FontWeight.w600))),
+                                              Expanded(flex: 2, child: Text(row.phone ?? '—')),
+                                              Expanded(flex: 3, child: Text(row.note ?? '—', maxLines: 1, overflow: TextOverflow.ellipsis)),
+                                              Expanded(
+                                                child: Align(
+                                                  alignment: Alignment.centerRight,
+                                                  child: IconButton(onPressed: () {}, icon: const Icon(Icons.more_horiz, size: 20)),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ],
+                              ),
                       ),
+                    ),
                   ],
                 ),
     );

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import '../../../auth/domain/entities/session.dart';
 import '../../../auth/domain/permissions.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../pos/presentation/pages/pos_page.dart';
@@ -14,13 +13,28 @@ import '../../../admin/presentation/pages/settings_editor_page.dart';
 import '../../../admin/presentation/pages/customers_page.dart';
 import '../../../admin/presentation/pages/inventory_hub_page.dart';
 import '../../../admin/presentation/pages/profile_page.dart';
+import '../../../admin/presentation/bloc/branch_context_cubit.dart';
 import '../../../admin/presentation/widgets/branch_switcher.dart';
 import '../../../orders/presentation/pages/orders_page.dart';
+import '../widgets/business_shell.dart';
 import 'dashboard_page.dart';
 import 'reports_page.dart';
 
-class AppShell extends StatelessWidget {
+class AppShell extends StatefulWidget {
   const AppShell({super.key});
+
+  @override
+  State<AppShell> createState() => _AppShellState();
+}
+
+class _AppShellState extends State<AppShell> {
+  late int _index;
+
+  @override
+  void initState() {
+    super.initState();
+    _index = 0;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -60,6 +74,18 @@ class AppShell extends StatelessWidget {
           icon: Icons.warehouse_outlined,
           label: 'Inventory',
           builder: (_) => const InventoryHubPage(),
+        ),
+      if (user.canManageInventory || user.can(PosPermissions.inventoryView))
+        WorkbenchDestination(
+          icon: Icons.shopping_cart_outlined,
+          label: 'Purchases',
+          builder: (_) => const InventoryHubPage(initialTab: 2),
+        ),
+      if (user.canManageInventory || user.can(PosPermissions.inventoryView))
+        WorkbenchDestination(
+          icon: Icons.local_shipping_outlined,
+          label: 'Suppliers',
+          builder: (_) => const InventoryHubPage(initialTab: 3),
         ),
       if (!user.isCashier && user.canRunPos)
         WorkbenchDestination(
@@ -104,49 +130,66 @@ class AppShell extends StatelessWidget {
           builder: (_) => ProfilePage(session: session),
         ),
     ];
+
     final sync = context.watch<SyncCubit>().state;
     final posIndex = destinations.indexWhere((item) => item.label == 'POS');
-    return WorkbenchShell(
-      title: SessionBanner(session: session),
-      initialIndex: user.isCashier && posIndex >= 0 ? posIndex : 0,
-      actions: [
-        const BranchSwitcher(),
+    final initial = user.isCashier && posIndex >= 0 ? posIndex : 0;
+    if (_index >= destinations.length) {
+      _index = initial;
+    }
+
+    return BusinessWorkbenchShell(
+      session: session,
+      destinations: destinations,
+      initialIndex: initial,
+      selectedIndex: _index,
+      onIndexChanged: (value) => setState(() => _index = value),
+      onNewOrder: posIndex >= 0 ? () => setState(() => _index = posIndex) : null,
+      onLogout: () => context.read<AuthBloc>().add(const AuthLogoutRequested()),
+      headerActions: [
+        const _HeaderBranchSwitcher(),
         if (!sync.online)
           const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 12),
-            child: Center(child: Text('Offline')),
+            padding: EdgeInsets.symmetric(horizontal: 8),
+            child: Center(
+              child: Text('Offline', style: TextStyle(color: Color(0xFFDC2626), fontWeight: FontWeight.w600)),
+            ),
           ),
         if (sync.pendingCount > 0)
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Center(child: Text('Sync ${sync.pendingCount}')),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Center(
+              child: Text('Sync ${sync.pendingCount}', style: const TextStyle(fontWeight: FontWeight.w600)),
+            ),
           ),
         IconButton(
+          tooltip: 'Sign out',
           onPressed: () => context.read<AuthBloc>().add(const AuthLogoutRequested()),
-          icon: const Icon(Icons.logout),
+          icon: const Icon(Icons.logout_rounded, color: Color(0xFF64748B)),
         ),
       ],
-      destinations: destinations,
     );
   }
 }
 
-class SessionBanner extends StatelessWidget {
-  const SessionBanner({super.key, required this.session});
-  final Session session;
+class _HeaderBranchSwitcher extends StatelessWidget {
+  const _HeaderBranchSwitcher();
 
   @override
   Widget build(BuildContext context) {
-    final business = session.business?.name ?? 'POS';
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(business, style: const TextStyle(fontWeight: FontWeight.w600)),
-        Text(
-          '${session.user.name} · ${PosRole.label(session.user.role)}',
-          style: const TextStyle(fontSize: 12),
-        ),
-      ],
+    return BlocBuilder<BranchContextCubit, BranchContextState>(
+      builder: (context, state) {
+        if (!state.showSwitcher) return const SizedBox.shrink();
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: const BranchSwitcher(),
+        );
+      },
     );
   }
 }

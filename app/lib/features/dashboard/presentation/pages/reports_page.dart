@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
+import 'package:decimal/decimal.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/widgets/workbench.dart';
 import '../../../admin/presentation/bloc/branch_context_cubit.dart';
@@ -179,9 +180,9 @@ class _ReportsPageState extends State<ReportsPage> with SingleTickerProviderStat
 
     return BlocListener<BranchContextCubit, BranchContextState>(
       listener: (_, __) => _load(),
-      child: ColoredBox(
-        color: const Color(0xFFF8FAFC),
-        child: PageFrame(
+        child: ColoredBox(
+          color: const Color(0xFFF8FAFC),
+          child: PageFrame(
           title: 'Reports',
           subtitle: 'Analyze your business performance with detailed reports and insights.',
           actions: [
@@ -575,7 +576,11 @@ class _OverviewTab extends StatelessWidget {
           height: 280,
           children: [
             ReportSectionCard(
-              title: 'Sales Trend',
+              title: data.from.year == data.to.year &&
+                      data.from.month == data.to.month &&
+                      data.from.day == data.to.day
+                  ? 'Sales Trend (Hourly)'
+                  : 'Sales Trend',
               trailing: DropdownButtonHideUnderline(
                 child: DropdownButton<String>(
                   value: trendGranularity,
@@ -601,6 +606,9 @@ class _OverviewTab extends StatelessWidget {
             ReportSectionCard(
               title: 'Hourly Sales Trend',
               child: ReportBarChart(
+                scrollable: true,
+                barWidth: 20,
+                minBarSlotWidth: 64,
                 values: [for (final h in data.hourly) h.sales.toDouble()],
                 labels: [for (final h in data.hourly) h.label],
               ),
@@ -753,20 +761,38 @@ class _TrendByGranularity extends StatelessWidget {
   final BusinessAnalytics data;
   final String granularity;
 
+  bool get _sameDay =>
+      data.from.year == data.to.year && data.from.month == data.to.month && data.from.day == data.to.day;
+
   @override
   Widget build(BuildContext context) {
     switch (granularity) {
       case 'Weekly':
+        if (data.weekly.isEmpty) return const Center(child: Text('No sales in this range'));
         return ReportBarChart(
           values: [for (final w in data.weekly) w.sales.toDouble()],
           labels: [for (final w in data.weekly) w.label.split(' · ').first],
         );
       case 'Monthly':
+        if (data.monthly.isEmpty) return const Center(child: Text('No sales in this range'));
         return ReportBarChart(
           values: [for (final m in data.monthly) m.sales.toDouble()],
           labels: [for (final m in data.monthly) m.label],
         );
       default:
+        // Today / Yesterday: a 1-point daily line is invisible — show hourly instead.
+        if (_sameDay || data.daily.length <= 1) {
+          if (data.hourly.every((h) => h.sales == Decimal.zero)) {
+            return const Center(child: Text('No sales in this range'));
+          }
+          return ReportBarChart(
+            scrollable: true,
+            barWidth: 20,
+            minBarSlotWidth: 64,
+            values: [for (final h in data.hourly) h.sales.toDouble()],
+            labels: [for (final h in data.hourly) h.label],
+          );
+        }
         return ReportSalesLineChart(days: data.daily);
     }
   }
@@ -821,6 +847,9 @@ class _SalesTab extends StatelessWidget {
                 child: ReportSectionCard(
                   title: 'Peak Hours',
                   child: ReportBarChart(
+                    scrollable: true,
+                    barWidth: 18,
+                    minBarSlotWidth: 56,
                     values: [for (final h in data.hourly) h.sales.toDouble()],
                     labels: [for (final h in data.hourly) h.label],
                   ),

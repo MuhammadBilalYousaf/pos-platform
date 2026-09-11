@@ -1,12 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:intl/intl.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/firebase/tenant_context.dart';
+import '../../../../core/widgets/admin_ui_kit.dart';
 import '../../data/admin_repository.dart';
 import '../bloc/branch_context_cubit.dart';
 
 class SuppliersTab extends StatefulWidget {
-  const SuppliersTab({super.key});
+  const SuppliersTab({
+    super.key,
+    this.standalone = false,
+    this.searchQuery = '',
+    this.onRegisterCreate,
+  });
+
+  final bool standalone;
+  final String searchQuery;
+  final ValueChanged<VoidCallback>? onRegisterCreate;
+
   @override
   State<SuppliersTab> createState() => _SuppliersTabState();
 }
@@ -19,9 +31,21 @@ class _SuppliersTabState extends State<SuppliersTab> {
   void initState() {
     super.initState();
     _load();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.onRegisterCreate?.call(_add);
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant SuppliersTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.searchQuery != widget.searchQuery) {
+      setState(() {});
+    }
   }
 
   Future<void> _load() async {
+    setState(() => _loading = true);
     final rows = await sl<AdminRepository>().listNamed('suppliers');
     if (!mounted) return;
     setState(() {
@@ -58,41 +82,128 @@ class _SuppliersTabState extends State<SuppliersTab> {
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator(color: kAdminAccent));
+    }
+    final q = widget.searchQuery.trim().toLowerCase();
+    final visible = _rows.where((row) {
+      if (q.isEmpty) return true;
+      final hay = '${row['name']} ${row['subtitle']} ${row['phone']}'.toLowerCase();
+      return hay.contains(q);
+    }).toList();
+
+    final table = Column(
+      children: [
+        const AdminTableHeader(columns: ['#', 'Supplier Name', 'Contact', 'Phone', 'Status', '']),
+        if (visible.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(32),
+            child: Center(child: Text('No suppliers yet.')),
+          )
+        else
+          Expanded(
+            child: ListView.separated(
+              itemCount: visible.length,
+              separatorBuilder: (_, __) => const Divider(height: 1, color: kAdminBorder),
+              itemBuilder: (context, index) {
+                final row = visible[index];
+                final name = row['name'] ?? '';
+                final phone = row['phone'] ?? row['subtitle'] ?? '';
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  child: Row(
+                    children: [
+                      Expanded(flex: 1, child: Text('${index + 1}', style: const TextStyle(color: kAdminMuted))),
+                      Expanded(flex: 3, child: Text(name, style: const TextStyle(fontWeight: FontWeight.w600))),
+                      Expanded(flex: 2, child: Text(name.split(' ').first, maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      Expanded(flex: 2, child: Text(phone, maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      Expanded(flex: 2, child: const AdminStatusPill(label: 'Active', tone: AdminStatusTone.success)),
+                      Expanded(
+                        flex: 1,
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: IconButton(onPressed: () {}, icon: const Icon(Icons.more_horiz, size: 20)),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+      ],
+    );
+
+    if (widget.standalone) {
+      return table;
+    }
     return Column(
       children: [
-        Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: _add, icon: const Icon(Icons.add), label: const Text('Supplier'))),
-        Expanded(
-          child: ListView(
-            children: [
-              for (final row in _rows) ListTile(title: Text(row['name'] ?? ''), subtitle: Text(row['subtitle'] ?? '')),
-            ],
+        Align(
+          alignment: Alignment.centerRight,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: TextButton.icon(
+              onPressed: _add,
+              icon: const Icon(Icons.add),
+              label: const Text('Supplier'),
+            ),
           ),
         ),
+        Expanded(child: table),
       ],
     );
   }
 }
 
 class PurchasesTab extends StatefulWidget {
-  const PurchasesTab({super.key});
+  const PurchasesTab({
+    super.key,
+    this.standalone = false,
+    this.onRegisterCreate,
+  });
+
+  final bool standalone;
+  final ValueChanged<VoidCallback>? onRegisterCreate;
+
   @override
   State<PurchasesTab> createState() => _PurchasesTabState();
 }
 
-class _PurchasesTabState extends State<PurchasesTab> {
+class _PurchasesTabState extends State<PurchasesTab> with SingleTickerProviderStateMixin {
   List<Map<String, String>> _rows = const [];
+  late TabController _filterTabs;
+  bool _loading = true;
 
   @override
   void initState() {
     super.initState();
+    _filterTabs = TabController(length: 4, vsync: this);
+    _filterTabs.addListener(() => setState(() {}));
     _load();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.onRegisterCreate?.call(_add);
+    });
+  }
+
+  @override
+  void dispose() {
+    _filterTabs.dispose();
+    super.dispose();
+  }
+
+  String _purchaseStatus(Map<String, String> row) {
+    return (row['status'] ?? 'Received').trim();
   }
 
   Future<void> _load() async {
+    setState(() => _loading = true);
     final rows = await sl<AdminRepository>().listNamed('purchases');
     if (!mounted) return;
-    setState(() => _rows = rows);
+    setState(() {
+      _rows = rows;
+      _loading = false;
+    });
   }
 
   Future<void> _add() async {
@@ -124,27 +235,122 @@ class _PurchasesTabState extends State<PurchasesTab> {
     await sl<AdminRepository>().saveNamed(
       collection: 'purchases',
       name: sku,
-      extra: {'ingredient_id': sku, 'quantity_base': qty.text.trim(), 'branch_id': branchId},
+      extra: {
+        'ingredient_id': sku,
+        'quantity_base': qty.text.trim(),
+        'branch_id': branchId,
+        'status': 'Received',
+      },
     );
     await _load();
   }
 
   @override
   Widget build(BuildContext context) {
-    return BlocListener<BranchContextCubit, BranchContextState>(
-      listener: (_, __) => _load(),
-      child: Column(
+    final filter = switch (_filterTabs.index) {
+      1 => 'Pending',
+      2 => 'Received',
+      3 => 'Cancelled',
+      _ => 'All',
+    };
+    final visible = _rows.where((row) {
+      if (filter == 'All') return true;
+      final st = _purchaseStatus(row);
+      if (filter == 'Pending') return st.toLowerCase().contains('pending');
+      if (filter == 'Received') return st.toLowerCase().contains('received') || st.isEmpty;
+      if (filter == 'Cancelled') return st.toLowerCase().contains('cancel');
+      return true;
+    }).toList();
+
+    Widget body;
+    if (_loading) {
+      body = const Center(child: CircularProgressIndicator(color: kAdminAccent));
+    } else {
+      body = Column(
         children: [
-          Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: _add, icon: const Icon(Icons.add), label: const Text('Receive'))),
-          Expanded(
-            child: ListView(
-              children: [
-                for (final row in _rows) ListTile(title: Text(row['name'] ?? ''), subtitle: Text(row['subtitle'] ?? '')),
+          if (widget.standalone)
+            TabBar(
+              controller: _filterTabs,
+              isScrollable: true,
+              labelColor: kAdminAccent,
+              unselectedLabelColor: kAdminMuted,
+              indicatorColor: kAdminAccent,
+              tabs: const [
+                Tab(text: 'All Purchases'),
+                Tab(text: 'Pending'),
+                Tab(text: 'Received'),
+                Tab(text: 'Cancelled'),
               ],
             ),
-          ),
+          const AdminTableHeader(columns: ['PO', 'Date', 'Supplier', 'Items', 'Total', 'Status', '']),
+          if (visible.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(32),
+              child: Center(child: Text('No purchases recorded yet.')),
+            )
+          else
+            Expanded(
+              child: ListView.separated(
+                itemCount: visible.length,
+                separatorBuilder: (_, __) => const Divider(height: 1, color: kAdminBorder),
+                itemBuilder: (context, index) {
+                  final row = visible[index];
+                  final name = row['name'] ?? '—';
+                  final status = _purchaseStatus(row);
+                  final tone = status.toLowerCase().contains('cancel')
+                      ? AdminStatusTone.danger
+                      : status.toLowerCase().contains('pending')
+                          ? AdminStatusTone.warning
+                          : AdminStatusTone.success;
+                  final created = row['created_at'];
+                  var dateLabel = row['subtitle'] ?? '—';
+                  if (created != null && created.isNotEmpty) {
+                    try {
+                      dateLabel = DateFormat('MMM d, yyyy').format(DateTime.parse(created));
+                    } catch (_) {}
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    child: Row(
+                      children: [
+                        Expanded(flex: 2, child: Text('#${index + 1}', style: const TextStyle(fontWeight: FontWeight.w700))),
+                        Expanded(flex: 2, child: Text(dateLabel, style: const TextStyle(fontSize: 12))),
+                        Expanded(flex: 2, child: Text('Supplier', style: const TextStyle(fontSize: 12))),
+                        Expanded(child: Text('1', style: const TextStyle(fontSize: 12))),
+                        Expanded(flex: 2, child: Text(name, style: const TextStyle(fontWeight: FontWeight.w600))),
+                        Expanded(flex: 2, child: AdminStatusPill(label: status, tone: tone)),
+                        Expanded(
+                          child: Align(
+                            alignment: Alignment.centerRight,
+                            child: IconButton(onPressed: () {}, icon: const Icon(Icons.visibility_outlined, size: 20)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
         ],
-      ),
+      );
+    }
+
+    return BlocListener<BranchContextCubit, BranchContextState>(
+      listener: (_, __) => _load(),
+      child: widget.standalone
+          ? body
+          : Column(
+              children: [
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: TextButton.icon(onPressed: _add, icon: const Icon(Icons.add), label: const Text('Receive')),
+                  ),
+                ),
+                Expanded(child: body),
+              ],
+            ),
     );
   }
 }

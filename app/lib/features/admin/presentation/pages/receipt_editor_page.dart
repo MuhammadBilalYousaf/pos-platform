@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/widgets/workbench.dart';
+import '../../../../core/widgets/admin_ui_kit.dart';
 import '../../../auth/domain/entities/session.dart';
-import '../../../auth/domain/permissions.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../printing/domain/printer_service.dart';
 import '../../data/admin_repository.dart';
@@ -98,75 +98,74 @@ class _ReceiptEditorPageState extends State<ReceiptEditorPage> {
 
   @override
   Widget build(BuildContext context) {
-    final session = _session;
     final wide = MediaQuery.sizeOf(context).width >= 980;
-    final form = ListView(
-      children: [
-        const Text('This is what customers see after a sale. Hardware printers are not connected yet; POS and Orders show this same preview.'),
-        const SizedBox(height: 16),
-        TextField(
-          controller: _header,
-          maxLines: 2,
-          decoration: const InputDecoration(
-            labelText: 'Header',
-            hintText: 'Shown at the top. Leave blank to use the business name.',
+    final form = AdminSurfaceCard(
+      child: ListView(
+        children: [
+          Text(
+            'This is what customers see after a sale.',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: kAdminMuted),
           ),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _address,
-          maxLines: 2,
-          decoration: const InputDecoration(labelText: 'Address on receipt'),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _phone,
-          decoration: const InputDecoration(labelText: 'Phone on receipt'),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _footer,
-          maxLines: 3,
-          decoration: const InputDecoration(
-            labelText: 'Footer',
-            hintText: 'Thank you, return policy, Wi-Fi, or socials',
+          const SizedBox(height: 16),
+          TextField(
+            controller: _header,
+            maxLines: 2,
+            decoration: adminInputDecoration('Header (shown at top)'),
           ),
-        ),
-        const SizedBox(height: 16),
-        Text('Paper width', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
-        SegmentedButton<int>(
-          segments: const [
-            ButtonSegment(value: 58, label: Text('58 mm')),
-            ButtonSegment(value: 80, label: Text('80 mm')),
-          ],
-          selected: {_paperWidthMm <= 58 ? 58 : 80},
-          onSelectionChanged: (value) => setState(() => _paperWidthMm = value.first),
-        ),
-        const SizedBox(height: 8),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('Show address'),
-          value: _showAddress,
-          onChanged: (value) => setState(() => _showAddress = value),
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('Show phone'),
-          value: _showPhone,
-          onChanged: (value) => setState(() => _showPhone = value),
-        ),
-        const SizedBox(height: 12),
-        FilledButton(
-          onPressed: _busy ? null : _save,
-          child: Text(_busy ? 'Saving…' : 'Save receipt'),
-        ),
-      ],
+          const SizedBox(height: 12),
+          TextField(
+            controller: _address,
+            maxLines: 2,
+            decoration: adminInputDecoration('Address on receipt'),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _phone,
+            decoration: adminInputDecoration('Phone on receipt'),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _footer,
+            maxLines: 3,
+            decoration: adminInputDecoration('Footer message'),
+          ),
+          const SizedBox(height: 16),
+          Text('Paper width', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          SegmentedButton<int>(
+            segments: const [
+              ButtonSegment(value: 58, label: Text('58 mm')),
+              ButtonSegment(value: 80, label: Text('80 mm')),
+            ],
+            selected: {_paperWidthMm <= 58 ? 58 : 80},
+            onSelectionChanged: (value) => setState(() => _paperWidthMm = value.first),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Show address'),
+            value: _showAddress,
+            onChanged: (value) => setState(() => _showAddress = value),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Show phone'),
+            value: _showPhone,
+            onChanged: (value) => setState(() => _showPhone = value),
+          ),
+        ],
+      ),
     );
     final preview = _ReceiptSlip(receipt: _preview);
     return PageFrame(
-      title: 'Receipt',
-      subtitle: '${session.user.name} · ${PosRole.label(session.user.role)} · view and edit the customer slip',
+      title: 'Receipt Settings',
+      subtitle: 'Configure the customer slip shown after each sale.',
+      actions: [
+        FilledButton(
+          style: adminPrimaryButtonStyle,
+          onPressed: _busy ? null : _save,
+          child: Text(_busy ? 'Saving…' : 'Save Changes'),
+        ),
+      ],
       child: wide
           ? Row(
               crossAxisAlignment: CrossAxisAlignment.start,

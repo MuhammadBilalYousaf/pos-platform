@@ -6,6 +6,7 @@ import '../../../core/firebase/tenant_context.dart';
 import '../../../core/utils/json_read.dart';
 import '../../../core/utils/order_totals.dart';
 import '../../auth/domain/entities/session.dart';
+import 'home_dashboard_models.dart';
 import 'reports_models.dart';
 
 class ReportFilters {
@@ -50,6 +51,20 @@ class DashboardSnapshot {
   final String deliveryCount;
   final List<Map<String, String>> paymentMix;
   final List<Map<String, String>> recentOrders;
+
+  factory DashboardSnapshot.fromHome(HomeDashboardSnapshot home) {
+    return DashboardSnapshot(
+      orderCount: home.orderCount.toString(),
+      total: moneyString(home.total),
+      lowStockCount: home.lowStockCount.toString(),
+      averageTicket: moneyString(home.averageTicket),
+      takeawayCount: home.takeawayCount.toString(),
+      dineInCount: home.dineInCount.toString(),
+      deliveryCount: home.deliveryCount.toString(),
+      paymentMix: home.paymentMix,
+      recentOrders: home.recentOrdersLegacy,
+    );
+  }
 }
 
 class SalesReport {
@@ -97,76 +112,221 @@ class DashboardRepository {
     return col;
   }
 
-  Future<DashboardSnapshot> today() async {
+  Future<HomeDashboardSnapshot> homeToday() async {
     try {
       final db = _firestore.requireDb();
       final businessId = _tenant.requireBusinessId();
       final business = db.collection('businesses').doc(businessId);
-      final ordersSnap = await _scoped(business.collection('orders'), 'branch_id').limit(300).get();
-      final start = DateTime.now();
-      final todayStart = DateTime(start.year, start.month, start.day);
-      var count = 0;
+      final ordersCol = business.collection('orders');
+
+      QuerySnapshot<Map<String, dynamic>> ordersSnap;
+      try {
+        ordersSnap = await _scoped(ordersCol, 'branch_id')
+            .orderBy('created_at', descending: true)
+            .limit(800)
+            .get();
+      } catch (_) {
+        ordersSnap = await _scoped(ordersCol, 'branch_id').limit(800).get();
+      }
+
+      final productsSnap = await business.collection('products').get();
+      final categoriesSnap = await business.collection('categories').get();
+      final productCategory = <String, String>{
+        for (final doc in productsSnap.docs)
+          doc.id: readString(asStringKeyMap(doc.data()), ['category_id', 'categoryId']),
+      };
+      final categoryNames = <String, String>{
+        for (final doc in categoriesSnap.docs)
+          doc.id: readString(asStringKeyMap(doc.data()), ['name'], doc.id),
+      };
+
+      final now = DateTime.now();
+      final todayStart = DateTime(now.year, now.month, now.day);
+      final yesterdayStart = todayStart.subtract(const Duration(days: 1));
+
+      var todayCount = 0;
+      var yesterdayCount = 0;
       var takeaway = 0;
       var dineIn = 0;
       var delivery = 0;
-      var sales = money('0');
+      var todaySales = money('0');
+      var yesterdaySales = money('0');
+      var todayItems = 0.0;
+      var yesterdayItems = 0.0;
       final methods = <String, Decimal>{};
       final todayRows = <Map<String, dynamic>>[];
+      final customers = <String>{};
+      final productUnits = <String, double>{};
+      final productRevenue = <String, Decimal>{};
+      final productNames = <String, String>{};
+      final categorySales = <String, Decimal>{};
+      final hourSales = List<Decimal>.filled(24, Decimal.zero);
+      final hourOrders = List<int>.filled(24, 0);
+
       for (final doc in ordersSnap.docs) {
         final data = asStringKeyMap(doc.data());
         data['id'] = doc.id;
-        final at = _createdAt(data['created_at']);
-        if (at != null && at.isBefore(todayStart)) continue;
         if (readString(data, ['status'], 'COMPLETED') == 'CANCELLED') continue;
         if (!_tenant.matchesBranch(readString(data, ['branch_id', 'branchId']))) continue;
-        count += 1;
-        sales += money(readString(data, ['total'], '0'));
-        final type = readString(data, ['order_type', 'orderType'], 'TAKEAWAY');
-        if (type == 'DINE_IN') {
-          dineIn += 1;
-        } else if (type == 'DELIVERY') {
-          delivery += 1;
+        final at = _createdAt(data['created_at']);
+        if (at == null) continue;
+
+        final isToday = !at.isBefore(todayStart);
+        final isYesterday = !at.isBefore(yesterdayStart) && at.isBefore(todayStart);
+        if (!isToday && !isYesterday) continue;
+
+        final total = money(readString(data, ['total'], '0'));
+        var lineCount = 0;
+        for (final raw in readList(data, ['items'])) {
+          final item = asStringKeyMap(raw);
+          final qty = double.tryParse(readString(item, ['quantity'], '0')) ?? 0;
+          lineCount += qty.round();
+          if (!isToday) continue;
+          final productId = readString(item, ['productId', 'product_id']);
+          final name = readString(item, ['productName', 'product_name'], productId);
+          productNames[productId] = name;
+          productUnits[productId] = (productUnits[productId] ?? 0) + qty;
+          final lineTotal = money(readString(item, ['lineTotal', 'line_total'], '0'));
+          productRevenue[productId] = (productRevenue[productId] ?? Decimal.zero) + lineTotal;
+          final catId = productCategory[productId] ?? 'uncategorized';
+          categorySales[catId] = (categorySales[catId] ?? Decimal.zero) + lineTotal;
+        }
+
+        if (isToday) {
+          todayCount += 1;
+          todaySales += total;
+          todayItems += lineCount;
+          final type = readString(data, ['order_type', 'orderType'], 'TAKEAWAY');
+          if (type == 'DINE_IN') {
+            dineIn += 1;
+          } else if (type == 'DELIVERY') {
+            delivery += 1;
+          } else {
+            takeaway += 1;
+          }
+          for (final raw in readList(data, ['payments'])) {
+            final payment = asStringKeyMap(raw);
+            final method = readString(payment, ['method'], 'OTHER');
+            methods[method] = (methods[method] ?? Decimal.zero) + money(readString(payment, ['amount'], '0'));
+          }
+          final customerKey = readString(data, ['customer_phone', 'customerPhone']);
+          if (customerKey.isNotEmpty) {
+            customers.add(customerKey);
+          } else {
+            customers.add(readString(data, ['customer_name', 'customerName'], 'Walk-in'));
+          }
+          hourSales[at.hour] += total;
+          hourOrders[at.hour] += 1;
+          todayRows.add(data);
         } else {
-          takeaway += 1;
+          yesterdayCount += 1;
+          yesterdaySales += total;
+          yesterdayItems += lineCount;
         }
-        for (final raw in readList(data, ['payments'])) {
-          final payment = asStringKeyMap(raw);
-          final method = readString(payment, ['method'], 'OTHER');
-          methods[method] = (methods[method] ?? Decimal.zero) + money(readString(payment, ['amount'], '0'));
-        }
-        todayRows.add(data);
       }
+
       todayRows.sort((a, b) {
         final aAt = _createdAt(a['created_at']) ?? DateTime.fromMillisecondsSinceEpoch(0);
         final bAt = _createdAt(b['created_at']) ?? DateTime.fromMillisecondsSinceEpoch(0);
         return bAt.compareTo(aAt);
       });
+
       final inventorySnap = await _scoped(business.collection('inventory'), 'branch_id').get();
-      var low = 0;
+      final lowStockItems = <LowStockItem>[];
       for (final doc in inventorySnap.docs) {
         final data = asStringKeyMap(doc.data());
         if (!_tenant.matchesBranch(readString(data, ['branch_id', 'branchId']))) continue;
-        if (money(readString(data, ['quantity_base', 'quantityBase'], '0')) <=
-            money(readString(data, ['reorder_level', 'reorderLevel'], '0'))) {
-          low += 1;
+        final qty = money(readString(data, ['quantity_base', 'quantityBase'], '0'));
+        final reorder = money(readString(data, ['reorder_level', 'reorderLevel'], '0'));
+        if (qty <= reorder) {
+          lowStockItems.add(
+            LowStockItem(
+              name: readString(data, ['ingredient_name', 'ingredientName'], doc.id),
+              current: moneyString(qty),
+              reorder: moneyString(reorder),
+            ),
+          );
         }
       }
-      final average = count == 0
+      lowStockItems.sort((a, b) => money(a.current).compareTo(money(b.current)));
+
+      final average = todayCount == 0
           ? money('0')
-          : (sales / Decimal.fromInt(count)).toDecimal(scaleOnInfinitePrecision: 2);
+          : (todaySales / Decimal.fromInt(todayCount)).toDecimal(scaleOnInfinitePrecision: 2);
+      final yesterdayAov = yesterdayCount == 0
+          ? Decimal.zero
+          : (yesterdaySales / Decimal.fromInt(yesterdayCount)).toDecimal(scaleOnInfinitePrecision: 2);
+
+      double shareOf(Decimal amount) {
+        if (todaySales == Decimal.zero) return 0;
+        return (amount / todaySales).toDouble() * 100;
+      }
+
+      final topProducts = [
+        for (final id in productRevenue.keys)
+          ProductSalesRow(
+            productId: id,
+            name: productNames[id] ?? id,
+            categoryId: productCategory[id] ?? '',
+            categoryName: categoryNames[productCategory[id] ?? ''] ?? 'Uncategorized',
+            units: productUnits[id] ?? 0,
+            revenue: productRevenue[id] ?? Decimal.zero,
+            share: shareOf(productRevenue[id] ?? Decimal.zero),
+          ),
+      ]..sort((a, b) => b.revenue.compareTo(a.revenue));
+
+      final categoriesToday = [
+        for (final e in (categorySales.entries.toList()..sort((a, b) => b.value.compareTo(a.value))))
+          NamedAmount(
+            id: e.key,
+            name: e.key == 'uncategorized' ? 'Uncategorized' : (categoryNames[e.key] ?? e.key),
+            amount: e.value,
+            share: shareOf(e.value),
+          ),
+      ];
+
       final mixEntries = methods.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
-      return DashboardSnapshot(
-        orderCount: count.toString(),
-        total: moneyString(sales),
-        lowStockCount: low.toString(),
-        averageTicket: moneyString(average),
-        takeawayCount: takeaway.toString(),
-        dineInCount: dineIn.toString(),
-        deliveryCount: delivery.toString(),
-        paymentMix: [
-          for (final entry in mixEntries) {'label': entry.key, 'total': moneyString(entry.value)},
-        ],
-        recentOrders: [
+      final paymentMix = [
+        for (final entry in mixEntries) {'label': entry.key, 'total': moneyString(entry.value)},
+      ];
+      final paymentSlices = [
+        for (final entry in mixEntries)
+          NamedAmount(
+            id: entry.key,
+            name: paymentLabel(entry.key),
+            amount: entry.value,
+            share: shareOf(entry.value),
+          ),
+      ];
+
+      final hourlyToday = <HourBucket>[
+        for (var h = 0; h < 24; h++)
+          if (h >= 8 && h <= 22 || hourOrders[h] > 0)
+            HourBucket(hour: h, sales: hourSales[h], orders: hourOrders[h]),
+      ];
+
+      final recentOrderRows = <DashboardRecentOrder>[
+        for (final row in todayRows.take(8))
+          DashboardRecentOrder(
+            orderNumber: readString(row, ['order_number', 'orderNumber']),
+            timeLabel: DateFormat.jm().format(_createdAt(row['created_at']) ?? now),
+            customer: readString(row, ['customer_name', 'customerName'], 'Walk-in'),
+            itemCount: readList(row, ['items']).length,
+            total: formatRs(money(readString(row, ['total'], '0'))),
+            status: readString(row, ['status'], 'COMPLETED'),
+          ),
+      ];
+
+      return HomeDashboardSnapshot(
+        orderCount: todayCount,
+        total: todaySales,
+        lowStockCount: lowStockItems.length,
+        averageTicket: average,
+        takeawayCount: takeaway,
+        dineInCount: dineIn,
+        deliveryCount: delivery,
+        paymentMix: paymentMix,
+        recentOrdersLegacy: [
           for (final row in todayRows.take(8))
             {
               'order_number': readString(row, ['order_number', 'orderNumber']),
@@ -175,10 +335,28 @@ class DashboardRepository {
               'customer': readString(row, ['customer_name', 'customerName'], 'Walk-in'),
             },
         ],
+        itemsSold: todayItems,
+        customersToday: customers.length,
+        salesVsYesterdayPct: pctChange(todaySales.toDouble(), yesterdaySales.toDouble()),
+        ordersVsYesterdayPct: pctChange(todayCount, yesterdayCount),
+        aovVsYesterdayPct: pctChange(average.toDouble(), yesterdayAov.toDouble()),
+        itemsVsYesterdayPct: pctChange(todayItems, yesterdayItems),
+        yesterdaySales: yesterdaySales,
+        hourlyToday: hourlyToday,
+        categoriesToday: categoriesToday,
+        topProducts: topProducts.take(5).toList(),
+        lowStockItems: lowStockItems.take(6).toList(),
+        paymentSlices: paymentSlices,
+        recentOrderRows: recentOrderRows,
       );
     } catch (error) {
       throw mapFirebaseFailure(error);
     }
+  }
+
+  Future<DashboardSnapshot> today() async {
+    final home = await homeToday();
+    return DashboardSnapshot.fromHome(home);
   }
 
   Future<SalesReport> range({required DateTime from, required DateTime to}) async {
@@ -229,8 +407,18 @@ class DashboardRepository {
       final db = _firestore.requireDb();
       final businessId = _tenant.requireBusinessId();
       final business = db.collection('businesses').doc(businessId);
+      final ordersCol = business.collection('orders');
 
-      final ordersSnap = await _scoped(business.collection('orders'), 'branch_id').limit(2500).get();
+      // Prefer newest orders so "Today" is reliable (unordered limit can miss today's docs).
+      QuerySnapshot<Map<String, dynamic>> ordersSnap;
+      try {
+        ordersSnap = await _scoped(ordersCol, 'branch_id')
+            .orderBy('created_at', descending: true)
+            .limit(2500)
+            .get();
+      } catch (_) {
+        ordersSnap = await _scoped(ordersCol, 'branch_id').limit(2500).get();
+      }
       final productsSnap = await business.collection('products').get();
       final categoriesSnap = await business.collection('categories').get();
 

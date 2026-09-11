@@ -12,6 +12,7 @@ import '../bloc/order_cubit.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/firebase/tenant_context.dart';
 import '../../../../core/utils/order_totals.dart';
+import '../../../../core/widgets/admin_ui_kit.dart';
 
 class PosPage extends StatefulWidget {
   const PosPage({super.key});
@@ -77,19 +78,29 @@ class _PosPageState extends State<PosPage> {
           if (desktop) {
             return Row(
               children: [
-                const SizedBox(width: 200, child: _CategoryRail()),
-                Expanded(child: _ProductPane(search: _search, searchFocus: _searchFocus)),
-                const SizedBox(width: 420, child: _CartPane()),
+                Expanded(
+                  child: ColoredBox(
+                    color: kAdminPageBg,
+                    child: _ProductPane(search: _search, searchFocus: _searchFocus),
+                  ),
+                ),
+                SizedBox(
+                  width: 420,
+                  child: _CartPane(),
+                ),
               ],
             );
           }
-          return Column(
-            children: [
-              _SearchBar(controller: _search, focusNode: _searchFocus),
-              const SizedBox(height: 56, child: _CategoryChips()),
-              const Expanded(child: _ProductGrid()),
-              const SizedBox(height: 280, child: _CartPane(compact: true)),
-            ],
+          return ColoredBox(
+            color: kAdminPageBg,
+            child: Column(
+              children: [
+                const _VerticalCategories(),
+                _SearchBar(controller: _search, focusNode: _searchFocus),
+                const Expanded(child: _ProductGrid()),
+                const SizedBox(height: 280, child: _CartPane(compact: true)),
+              ],
+            ),
           );
         },
       ),
@@ -105,83 +116,186 @@ class _SearchBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-      child: TextField(
-        controller: controller,
-        focusNode: focusNode,
-        decoration: const InputDecoration(
-          prefixIcon: Icon(Icons.search),
-          hintText: 'Search name or SKU',
-        ),
-        onChanged: context.read<CatalogCubit>().search,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: controller,
+              focusNode: focusNode,
+              decoration: adminInputDecoration('Search name or SKU (all categories)', icon: Icons.search),
+              onChanged: context.read<CatalogCubit>().search,
+            ),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
+            style: adminOutlinedButtonStyle,
+            onPressed: () {},
+            icon: const Icon(Icons.qr_code_scanner, size: 18),
+            label: const Text('Scan'),
+          ),
+        ],
       ),
     );
   }
 }
 
-class _CategoryRail extends StatelessWidget {
-  const _CategoryRail();
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      child: BlocBuilder<CatalogCubit, CatalogState>(
-        builder: (context, state) {
-          final categories = state.catalog?.categories ?? [];
-          return ListView(
-            children: [
-              ListTile(
-                title: const Text('All'),
-                selected: state.selectedCategoryId == null,
-                onTap: () => context.read<CatalogCubit>().selectCategory(null),
-              ),
-              for (final category in categories)
-                ListTile(
-                  title: Text(category.name),
-                  selected: state.selectedCategoryId == category.id,
-                  onTap: () => context.read<CatalogCubit>().selectCategory(category.id),
-                ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-}
-
-class _CategoryChips extends StatelessWidget {
-  const _CategoryChips();
+class _VerticalCategories extends StatelessWidget {
+  const _VerticalCategories();
 
   @override
   Widget build(BuildContext context) {
     return BlocBuilder<CatalogCubit, CatalogState>(
       builder: (context, state) {
         final categories = state.catalog?.categories ?? [];
-        return ListView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: ChoiceChip(
-                label: const Text('All'),
-                selected: state.selectedCategoryId == null,
-                onSelected: (_) => context.read<CatalogCubit>().selectCategory(null),
-              ),
-            ),
-            for (final category in categories)
-              Padding(
-                padding: const EdgeInsets.all(8),
-                child: ChoiceChip(
-                  label: Text(category.name),
-                  selected: state.selectedCategoryId == category.id,
-                  onSelected: (_) => context.read<CatalogCubit>().selectCategory(category.id),
+        if (categories.isEmpty && state.status != CatalogStatus.ready) {
+          return const SizedBox.shrink();
+        }
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 240),
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                _PosCategoryButton(
+                  label: 'All',
+                  selected: state.selectedCategoryId == null,
+                  onTap: () => context.read<CatalogCubit>().selectCategory(null),
                 ),
-              ),
-          ],
+                for (final category in categories)
+                  _PosCategoryButton(
+                    label: category.name,
+                    selected: state.selectedCategoryId == category.id,
+                    onTap: () => context.read<CatalogCubit>().selectCategory(category.id),
+                  ),
+              ],
+            ),
+          ),
         );
       },
+    );
+  }
+}
+
+class _PosCategoryButton extends StatefulWidget {
+  const _PosCategoryButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  State<_PosCategoryButton> createState() => _PosCategoryButtonState();
+}
+
+class _PosCategoryButtonState extends State<_PosCategoryButton> with SingleTickerProviderStateMixin {
+  late AnimationController _pressController;
+  late Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _pressController = AnimationController(vsync: this, duration: const Duration(milliseconds: 120));
+    _scale = Tween<double>(begin: 1, end: 0.97).animate(CurvedAnimation(parent: _pressController, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _pressController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: ScaleTransition(
+        scale: _scale,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeOutCubic,
+          decoration: BoxDecoration(
+            color: widget.selected ? kAdminAccent : Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: widget.selected ? kAdminAccent : kAdminBorder,
+              width: widget.selected ? 2 : 1,
+            ),
+            boxShadow: widget.selected
+                ? [
+                    BoxShadow(
+                      color: kAdminAccent.withValues(alpha: 0.35),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ]
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.04),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: widget.onTap,
+              onHighlightChanged: (down) {
+                if (down) {
+                  _pressController.forward();
+                } else {
+                  _pressController.reverse();
+                }
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+                child: Row(
+                  children: [
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 280),
+                      curve: Curves.easeOutCubic,
+                      width: 4,
+                      height: widget.selected ? 22 : 0,
+                      margin: EdgeInsets.only(right: widget.selected ? 10 : 0),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                    ),
+                    Expanded(
+                      child: AnimatedDefaultTextStyle(
+                        duration: const Duration(milliseconds: 220),
+                        style: TextStyle(
+                          color: widget.selected ? Colors.white : const Color(0xFF1E293B),
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
+                        child: Text(widget.label),
+                      ),
+                    ),
+                    AnimatedRotation(
+                      duration: const Duration(milliseconds: 280),
+                      turns: widget.selected ? 0 : -0.02,
+                      child: Icon(
+                        Icons.chevron_right_rounded,
+                        size: 20,
+                        color: widget.selected ? Colors.white.withValues(alpha: 0.9) : kAdminMuted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -194,7 +308,9 @@ class _ProductPane extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        const _VerticalCategories(),
         _SearchBar(controller: search, focusNode: searchFocus),
         const Expanded(child: _ProductGrid()),
       ],
@@ -217,7 +333,14 @@ class _ProductGrid extends StatelessWidget {
         }
         final products = state.visibleProducts;
         if (products.isEmpty) {
-          return const Center(child: Text('No products in this view.'));
+          final q = state.query.trim();
+          return Center(
+            child: Text(
+              q.isNotEmpty
+                  ? 'No products match "$q" across categories.'
+                  : 'No products in this category.',
+            ),
+          );
         }
         return GridView.builder(
           padding: const EdgeInsets.all(16),
@@ -235,9 +358,12 @@ class _ProductGrid extends StatelessWidget {
               onTap: () => _add(context, product),
               child: Ink(
                 decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surface,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: kAdminBorder),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 8, offset: const Offset(0, 2)),
+                  ],
                 ),
                 child: Padding(
                   padding: const EdgeInsets.all(12),
@@ -245,10 +371,19 @@ class _ProductGrid extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Expanded(
-                        child: Text(product.name, style: Theme.of(context).textTheme.titleMedium),
+                        child: Container(
+                          width: double.infinity,
+                          decoration: BoxDecoration(
+                            color: kAdminAccentSoft,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Icon(Icons.icecream_outlined, color: kAdminAccent, size: 32),
+                        ),
                       ),
-                      if (product.sku != null) Text(product.sku!, style: Theme.of(context).textTheme.bodySmall),
-                      Text(variant.price, style: Theme.of(context).textTheme.headlineSmall),
+                      const SizedBox(height: 8),
+                      Text(product.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
+                      if (product.sku != null) Text(product.sku!, style: const TextStyle(color: kAdminMuted, fontSize: 11)),
+                      Text('Rs. ${variant.price}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: kAdminAccent)),
                     ],
                   ),
                 ),
@@ -339,14 +474,19 @@ class _CartPane extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      elevation: 2,
-      child: BlocBuilder<CartCubit, CartState>(
+      color: Colors.white,
+      elevation: 0,
+      child: Container(
+        decoration: const BoxDecoration(
+          border: Border(left: BorderSide(color: kAdminBorder)),
+        ),
+        child: BlocBuilder<CartCubit, CartState>(
         builder: (context, cart) {
           final totals = cart.totals;
           return Column(
             children: [
               ListTile(
-                title: const Text('Ticket'),
+                title: const Text('Current Order', style: TextStyle(fontWeight: FontWeight.w800)),
                 subtitle: Text('${cart.orderType}${cart.customerName == null || cart.customerName!.isEmpty ? '' : ' · ${cart.customerName}'}'),
                 trailing: TextButton(onPressed: () => _ticketMeta(context, cart), child: const Text('Details')),
               ),
@@ -387,6 +527,7 @@ class _CartPane extends StatelessWidget {
                       children: [
                         Expanded(
                           child: OutlinedButton(
+                            style: adminOutlinedButtonStyle,
                             onPressed: cart.isEmpty ? null : () => context.read<CartCubit>().holdTicket(),
                             child: const Text('Hold'),
                           ),
@@ -394,6 +535,7 @@ class _CartPane extends StatelessWidget {
                         const SizedBox(width: 8),
                         Expanded(
                           child: OutlinedButton(
+                            style: adminOutlinedButtonStyle,
                             onPressed: () => _recall(context),
                             child: Text('Recall (${context.read<CartCubit>().heldTickets.length})'),
                           ),
@@ -404,10 +546,11 @@ class _CartPane extends StatelessWidget {
                     SizedBox(
                       width: double.infinity,
                       child: FilledButton(
+                        style: adminPrimaryButtonStyle,
                         onPressed: cart.isEmpty ? null : () => payCurrentSale(context),
                         child: const Padding(
                           padding: EdgeInsets.symmetric(vertical: 14),
-                          child: Text('Pay'),
+                          child: Text('Proceed to Payment'),
                         ),
                       ),
                     ),
@@ -417,6 +560,7 @@ class _CartPane extends StatelessWidget {
             ],
           );
         },
+        ),
       ),
     );
   }

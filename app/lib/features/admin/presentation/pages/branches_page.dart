@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/widgets/workbench.dart';
+import '../../../../core/widgets/admin_ui_kit.dart';
 import '../../../auth/domain/entities/session.dart';
 import '../../data/admin_repository.dart';
 import 'staff_page.dart';
@@ -125,26 +126,71 @@ class _BranchesPageState extends State<BranchesPage> {
     }
     return PageFrame(
       title: 'Branches',
-      subtitle: 'Create locations, then assign managers and employees. Stock and tickets follow the branch.',
+      subtitle: 'Manage your business branches, locations, and assigned staff.',
       actions: [
-        FilledButton.icon(onPressed: () => _edit(), icon: const Icon(Icons.add), label: const Text('Branch')),
+        FilledButton.icon(
+          style: adminPrimaryButtonStyle,
+          onPressed: () => _edit(),
+          icon: const Icon(Icons.add, size: 18),
+          label: const Text('+ Add Branch'),
+        ),
       ],
       child: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(child: CircularProgressIndicator(color: kAdminAccent))
           : _error != null
               ? Center(child: Text(_error!))
-              : ListView(
-                  children: [
-                    for (final row in _rows)
-                      Card(
-                        child: ListTile(
-                          title: Text(row.name),
-                          subtitle: Text('${row.code}${row.active ? '' : ' · inactive'}'),
-                          trailing: TextButton(onPressed: () => setState(() => _staffFor = row.id), child: const Text('Staff')),
-                          onTap: () => _edit(branch: row),
-                        ),
+              : LayoutBuilder(
+                  builder: (context, constraints) {
+                    final cols = constraints.maxWidth >= 1100 ? 3 : constraints.maxWidth >= 700 ? 2 : 1;
+                    return GridView.builder(
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: cols,
+                        crossAxisSpacing: 14,
+                        mainAxisSpacing: 14,
+                        childAspectRatio: 1.35,
                       ),
-                  ],
+                      itemCount: _rows.length,
+                      itemBuilder: (context, index) {
+                        final row = _rows[index];
+                        return AdminSurfaceCard(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(row.name, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+                                  ),
+                                  AdminStatusPill(
+                                    label: row.active ? 'Active' : 'Inactive',
+                                    tone: row.active ? AdminStatusTone.success : AdminStatusTone.neutral,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Text(row.code, style: const TextStyle(color: kAdminMuted, fontSize: 12)),
+                              if (row.address != null && row.address!.isNotEmpty) ...[
+                                const SizedBox(height: 6),
+                                Text(row.address!, maxLines: 2, overflow: TextOverflow.ellipsis),
+                              ],
+                              if (row.phone != null && row.phone!.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                Text(row.phone!, style: const TextStyle(color: kAdminMuted, fontSize: 12)),
+                              ],
+                              const Spacer(),
+                              Row(
+                                children: [
+                                  TextButton(onPressed: () => setState(() => _staffFor = row.id), child: const Text('Staff')),
+                                  const Spacer(),
+                                  TextButton(onPressed: () => _edit(branch: row), child: const Text('Edit')),
+                                ],
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    );
+                  },
                 ),
     );
   }
