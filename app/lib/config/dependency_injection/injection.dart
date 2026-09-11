@@ -19,6 +19,7 @@ import '../../features/products/presentation/bloc/catalog_cubit.dart';
 import '../../features/pos/presentation/bloc/cart_cubit.dart';
 import '../../features/pos/presentation/bloc/order_cubit.dart';
 import '../../features/orders/data/repositories/order_repository.dart';
+import '../../features/orders/data/repositories/held_ticket_repository.dart';
 import '../../features/printing/domain/printer_service.dart';
 import '../../features/sync/presentation/bloc/sync_cubit.dart';
 import '../../features/dashboard/data/dashboard_repository.dart';
@@ -79,7 +80,8 @@ Future<void> configureDependencies() async {
     () => CatalogRepositoryImpl(sl(), sl(), Hive.box(HiveBoxes.catalog)),
   );
   sl.registerFactory(() => CatalogCubit(sl()));
-  sl.registerFactory(() => CartCubit(Hive.box(HiveBoxes.heldTickets)));
+  sl.registerLazySingleton(() => HeldTicketRepository(sl(), sl()));
+  sl.registerFactory(() => CartCubit(Hive.box(HiveBoxes.heldTickets), sl()));
 
   sl.registerLazySingleton(() => OrderRepository(sl(), sl(), Hive.box(HiveBoxes.pendingOrders)));
   sl.registerLazySingleton<PrinterService>(() => PreviewPrinterService(EscPosEncoder()));

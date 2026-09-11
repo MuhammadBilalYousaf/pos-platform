@@ -242,6 +242,15 @@ service cloud.firestore {
           && inAssignedBranch(request.resource.data.branch_id);
         allow update: if canManageOps(bizId) && (isBizAdmin() || inAssignedBranch(resource.data.branch_id));
       }
+      match /held_tickets/{id} {
+        allow read: if canAccess(bizId) && canSell(bizId)
+          && (isBizAdmin() || isPlatformAdmin() || inAssignedBranch(resource.data.branch_id));
+        allow create: if canSell(bizId)
+          && bizStatusOk(bizId)
+          && inAssignedBranch(request.resource.data.branch_id);
+        allow update, delete: if canSell(bizId)
+          && (isBizAdmin() || inAssignedBranch(resource.data.branch_id));
+      }
       match /customers/{id} {
         allow read: if canAccess(bizId) && canSell(bizId);
         allow write: if canSell(bizId);

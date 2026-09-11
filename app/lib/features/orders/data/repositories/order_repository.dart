@@ -180,6 +180,7 @@ class OrderRepository {
 
         final record = {
           'id': idempotencyKey,
+          'business_id': businessId,
           'order_number': orderNumber,
           'branch_id': branchId,
           'status': 'COMPLETED',

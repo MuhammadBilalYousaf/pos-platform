@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import '../../../products/domain/entities/catalog.dart';
 import '../../../../core/utils/json_read.dart';
 import '../../../../core/utils/order_totals.dart';
+import '../../../orders/data/repositories/held_ticket_repository.dart';
 
 class CartLine extends Equatable {
   const CartLine({
@@ -93,6 +94,7 @@ class CartState extends Equatable {
     this.customerPhone,
     this.tableNo,
     this.note,
+    this.heldSnapshot = 0,
   });
 
   final List<CartLine> lines;
@@ -103,6 +105,8 @@ class CartState extends Equatable {
   final String? customerPhone;
   final String? tableNo;
   final String? note;
+  /// Bumped when held-ticket list changes so POS UI rebuilds recall count.
+  final int heldSnapshot;
 
   OrderTotals get totals => calculateOrderTotals(
         lines: lines
@@ -131,6 +135,7 @@ class CartState extends Equatable {
     String? tableNo,
     String? note,
     bool clearCustomer = false,
+    int? heldSnapshot,
   }) {
     return CartState(
       lines: lines ?? this.lines,
@@ -141,6 +146,7 @@ class CartState extends Equatable {
       customerPhone: clearCustomer ? null : (customerPhone ?? this.customerPhone),
       tableNo: tableNo ?? this.tableNo,
       note: note ?? this.note,
+      heldSnapshot: heldSnapshot ?? this.heldSnapshot,
     );
   }
 
@@ -169,7 +175,7 @@ class CartState extends Equatable {
   }
 
   @override
-  List<Object?> get props => [lines, orderDiscount, taxRate, orderType, customerName, customerPhone, tableNo, note];
+  List<Object?> get props => [lines, orderDiscount, taxRate, orderType, customerName, customerPhone, tableNo, note, heldSnapshot];
 }
 
 class HeldTicket {
@@ -182,9 +188,23 @@ class HeldTicket {
 }
 
 class CartCubit extends Cubit<CartState> {
-  CartCubit(this._held) : super(const CartState(lines: []));
+  CartCubit(this._heldBox, this._heldTickets) : super(const CartState(lines: [])) {
+    refreshHeldTickets();
+  }
 
-  final Box<dynamic> _held;
+  final Box<dynamic> _heldBox;
+  final HeldTicketRepository _heldTickets;
+  List<HeldTicket> _heldCache = const [];
+
+  Future<void> refreshHeldTickets() async {
+    try {
+      _heldCache = await _heldTickets.list();
+      _syncHiveFromRemote(_heldCache);
+    } catch (_) {
+      _heldCache = _readHeldFromHive();
+    }
+    emit(state.copyWith(heldSnapshot: state.heldSnapshot + 1));
+  }
 
   void setTaxRate(String taxRate) => emit(state.copyWith(taxRate: taxRate));
 
@@ -272,17 +292,25 @@ class CartCubit extends Cubit<CartState> {
     final label = state.customerName?.trim().isNotEmpty == true
         ? state.customerName!
         : 'Ticket ${heldTickets.length + 1}';
-    await _held.put(id, {
-      'id': id,
-      'label': label,
-      'heldAt': DateTime.now().toIso8601String(),
-      'cart': state.toJson(),
-    });
+    final ticket = HeldTicket(id: id, label: label, heldAt: DateTime.now(), cart: state);
+    try {
+      await _heldTickets.save(ticket);
+    } catch (_) {
+      await _heldBox.put(id, {
+        'id': id,
+        'label': label,
+        'heldAt': ticket.heldAt.toIso8601String(),
+        'cart': state.toJson(),
+      });
+    }
+    await refreshHeldTickets();
     clear();
   }
 
-  List<HeldTicket> get heldTickets {
-    return _held.values.whereType<Map>().map((raw) {
+  List<HeldTicket> get heldTickets => _heldCache;
+
+  List<HeldTicket> _readHeldFromHive() {
+    return _heldBox.values.whereType<Map>().map((raw) {
       final json = asStringKeyMap(raw);
       return HeldTicket(
         id: readString(json, ['id']),
@@ -294,19 +322,39 @@ class CartCubit extends Cubit<CartState> {
       ..sort((a, b) => b.heldAt.compareTo(a.heldAt));
   }
 
-  Future<void> recallTicket(String id) async {
-    final raw = _held.get(id);
-    if (raw is! Map) {
-      return;
+  Future<void> _syncHiveFromRemote(List<HeldTicket> remote) async {
+    await _heldBox.clear();
+    for (final ticket in remote) {
+      await _heldBox.put(ticket.id, {
+        'id': ticket.id,
+        'label': ticket.label,
+        'heldAt': ticket.heldAt.toIso8601String(),
+        'cart': ticket.cart.toJson(),
+      });
     }
-    final ticket = HeldTicket(
-      id: id,
-      label: '',
-      heldAt: DateTime.now(),
-      cart: CartState.fromJson(asStringKeyMap(asStringKeyMap(raw)['cart'])).copyWith(taxRate: state.taxRate),
-    );
-    await _held.delete(id);
-    emit(ticket.cart.copyWith(taxRate: state.taxRate));
+  }
+
+  Future<void> recallTicket(String id) async {
+    HeldTicket? ticket;
+    for (final item in _heldCache) {
+      if (item.id == id) {
+        ticket = item;
+        break;
+      }
+    }
+    ticket ??= () {
+      for (final item in _readHeldFromHive()) {
+        if (item.id == id) return item;
+      }
+      return null;
+    }();
+    if (ticket == null) return;
+    try {
+      await _heldTickets.delete(id);
+    } catch (_) {}
+    await _heldBox.delete(id);
+    await refreshHeldTickets();
+    emit(ticket.cart.copyWith(taxRate: state.taxRate, heldSnapshot: state.heldSnapshot));
   }
 
   void clear() => emit(

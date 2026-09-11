@@ -538,8 +538,9 @@ class AdminRepository {
       final ingredientId = _slug(sku == null || sku.isEmpty ? name : sku).toUpperCase();
       final db = _firestore.requireDb();
       final business = db.collection('businesses').doc(businessId);
-      await business.collection('ingredients').doc(ingredientId).set({
+      await _firestore.requireDb().collection('businesses').doc(businessId).collection('ingredients').doc(ingredientId).set({
         'id': ingredientId,
+        'business_id': businessId,
         'name': name,
         'sku': ingredientId,
         'unit': 'PCS',
@@ -547,6 +548,7 @@ class AdminRepository {
       final inventoryId = '${branchId}_$ingredientId';
       await business.collection('inventory').doc(inventoryId).set({
         'id': inventoryId,
+        'business_id': businessId,
         'branch_id': branchId,
         'ingredient_id': ingredientId,
         'ingredient_name': name,
@@ -878,6 +880,7 @@ class AdminRepository {
       final businessId = _tenant.requireBusinessId();
       await _firestore.requireDb().collection('businesses').doc(businessId).collection('recipes').doc(productId).set({
         'id': productId,
+        'business_id': businessId,
         'product_id': productId,
         'name': productName,
         'yield_qty': '1',
@@ -939,16 +942,31 @@ class AdminRepository {
     try {
       final businessId = _tenant.requireBusinessId();
       final docId = (id != null && id.isNotEmpty) ? id : _slug(name);
+      final branchId = _tenant.effectiveBranchId;
       await _firestore.requireDb().collection('businesses').doc(businessId).collection(collection).doc(docId).set({
         'id': docId,
+        'business_id': businessId,
         'name': name,
+        if (branchId != null &&
+            branchId.isNotEmpty &&
+            !extra.containsKey('branch_id') &&
+            !extra.containsKey('branchId') &&
+            _collectionUsesBranch(collection))
+          'branch_id': branchId,
         ...extra,
         'updated_at': FieldValue.serverTimestamp(),
+        'created_at': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
       await writeAudit(action: '$collection.save', detail: name);
     } catch (error) {
       throw mapFirebaseFailure(error);
     }
+  }
+
+  bool _collectionUsesBranch(String collection) {
+    return collection == 'purchases' ||
+        collection == 'waste' ||
+        collection == 'held_tickets';
   }
 
   Future<void> recordWaste({required String ingredientId, required String quantity, required String reason}) async {

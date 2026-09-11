@@ -7,6 +7,14 @@
         { "fieldPath": "branch_id", "order": "ASCENDING" },
         { "fieldPath": "created_at", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "held_tickets",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "branch_id", "order": "ASCENDING" },
+        { "fieldPath": "held_at", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []
