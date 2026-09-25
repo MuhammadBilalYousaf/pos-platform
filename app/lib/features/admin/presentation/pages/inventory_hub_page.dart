@@ -33,57 +33,84 @@ class InventoryHubPage extends StatelessWidget {
       case InventoryHubMode.suppliersOnly:
         return const _SuppliersStandalonePage();
       case InventoryHubMode.full:
-        return DefaultTabController(
-          length: 6,
-          initialIndex: initialTab.clamp(0, 5),
-          child: PageFrame(
-            title: 'Inventory',
-            subtitle: 'Track and manage your stock, recipes, purchases, and waste.',
-            actions: [
-              FilledButton.icon(
-                style: adminPrimaryButtonStyle,
-                onPressed: () {},
-                icon: const Icon(Icons.add, size: 18),
-                label: const Text('Add Stock'),
-              ),
-            ],
-            child: Column(
-              children: [
-                TabBar(
-                  isScrollable: true,
-                  labelColor: kAdminAccent,
-                  unselectedLabelColor: kAdminMuted,
-                  indicatorColor: kAdminAccent,
-                  tabs: const [
-                    Tab(text: 'Current Stock'),
-                    Tab(text: 'Recipes'),
-                    Tab(text: 'Purchases'),
-                    Tab(text: 'Suppliers'),
-                    Tab(text: 'Transfers'),
-                    Tab(text: 'Waste'),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: AdminSurfaceCard(
-                    padding: EdgeInsets.zero,
-                    child: TabBarView(
-                      children: [
-                        InventoryAdminPage(embedded: true),
-                        RecipesTab(),
-                        const PurchasesTab(),
-                        const SuppliersTab(),
-                        TransfersTab(),
-                        WasteTab(),
-                      ],
-                    ),
-                  ),
-                ),
+        return _InventoryFullPage(initialTab: initialTab.clamp(0, 5));
+    }
+  }
+}
+
+class _InventoryFullPage extends StatefulWidget {
+  const _InventoryFullPage({required this.initialTab});
+
+  final int initialTab;
+
+  @override
+  State<_InventoryFullPage> createState() => _InventoryFullPageState();
+}
+
+class _InventoryFullPageState extends State<_InventoryFullPage> {
+  VoidCallback? _addStock;
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 6,
+      initialIndex: widget.initialTab,
+      child: PageFrame(
+        title: 'Inventory',
+        subtitle: 'Track and manage your stock, recipes, purchases, and waste.',
+        actions: [
+          FilledButton.icon(
+            style: adminPrimaryButtonStyle,
+            onPressed: _addStock,
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('Add Stock'),
+          ),
+        ],
+        child: Column(
+          children: [
+            TabBar(
+              isScrollable: true,
+              labelColor: kAdminAccent,
+              unselectedLabelColor: kAdminMuted,
+              indicatorColor: kAdminAccent,
+              tabs: const [
+                Tab(text: 'Current Stock'),
+                Tab(text: 'Recipes'),
+                Tab(text: 'Purchases'),
+                Tab(text: 'Suppliers'),
+                Tab(text: 'Transfers'),
+                Tab(text: 'Waste'),
               ],
             ),
-          ),
-        );
-    }
+            const SizedBox(height: 12),
+            Expanded(
+              child: AdminSurfaceCard(
+                padding: EdgeInsets.zero,
+                child: TabBarView(
+                  children: [
+                    InventoryAdminPage(
+                      embedded: true,
+                      onRegisterCreate: (fn) {
+                        if (_addStock == fn) return;
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (!mounted || _addStock == fn) return;
+                          setState(() => _addStock = fn);
+                        });
+                      },
+                    ),
+                    RecipesTab(),
+                    const PurchasesTab(),
+                    const SuppliersTab(),
+                    TransfersTab(),
+                    WasteTab(),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

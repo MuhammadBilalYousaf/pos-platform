@@ -7,8 +7,9 @@ import '../../data/admin_repository.dart';
 import '../bloc/branch_context_cubit.dart';
 
 class InventoryAdminPage extends StatefulWidget {
-  const InventoryAdminPage({super.key, this.embedded = false});
+  const InventoryAdminPage({super.key, this.embedded = false, this.onRegisterCreate});
   final bool embedded;
+  final ValueChanged<VoidCallback>? onRegisterCreate;
 
   @override
   State<InventoryAdminPage> createState() => _InventoryAdminPageState();
@@ -23,6 +24,7 @@ class _InventoryAdminPageState extends State<InventoryAdminPage> {
   @override
   void initState() {
     super.initState();
+    widget.onRegisterCreate?.call(_add);
     _load();
   }
 
@@ -73,14 +75,19 @@ class _InventoryAdminPageState extends State<InventoryAdminPage> {
         ],
       ),
     );
-    if (ok != true) return;
-    await sl<AdminRepository>().upsertIngredient(
-      name: name.text.trim(),
-      sku: sku.text.trim().isEmpty ? null : sku.text.trim(),
-      quantity: qty.text.trim(),
-      reorderLevel: reorder.text.trim(),
-    );
-    await _load();
+    if (ok != true || name.text.trim().isEmpty) return;
+    try {
+      await sl<AdminRepository>().upsertIngredient(
+        name: name.text.trim(),
+        sku: sku.text.trim().isEmpty ? null : sku.text.trim(),
+        quantity: qty.text.trim().isEmpty ? '0' : qty.text.trim(),
+        reorderLevel: reorder.text.trim().isEmpty ? '0' : reorder.text.trim(),
+      );
+      await _load();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+    }
   }
 
   Future<void> _adjust(InventoryItem item) async {
