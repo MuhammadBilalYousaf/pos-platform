@@ -157,10 +157,12 @@ class OrderCubit extends Cubit<OrderState> {
     );
 
     var printed = true;
+    Object? printError;
     try {
       await _printer.printReceipt(receipt);
-    } catch (_) {
+    } catch (error) {
       printed = false;
+      printError = error;
     }
 
     if (offline) {
@@ -179,7 +181,9 @@ class OrderCubit extends Cubit<OrderState> {
     emit(
       OrderCompleted(
         receipt: receipt,
-        message: printed ? 'Order completed.' : 'Order completed. Receipt preview is on screen.',
+        message: printed
+            ? 'Order completed.'
+            : 'Order saved. Receipt was not printed. ${printError ?? 'Choose a printer in Receipt Settings.'}',
         printed: printed,
       ),
     );

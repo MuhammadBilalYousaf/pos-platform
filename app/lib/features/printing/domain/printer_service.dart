@@ -1,5 +1,8 @@
 import 'dart:typed_data';
 
+import '../data/printer_settings_store.dart';
+import '../data/raw_printer.dart';
+
 class ReceiptLine {
   const ReceiptLine({
     required this.name,
@@ -65,7 +68,7 @@ class ReceiptData {
   final String? tendered;
   final String? change;
 
-  String get separator => paperWidthMm <= 58 ? '----------------' : '--------------------------------';
+  String get separator => '-' * columns;
 
   String get titleLine {
     final value = header?.trim() ?? '';
@@ -123,7 +126,7 @@ class ReceiptData {
       ..writeln('Date: ${createdAt.toLocal()}')
       ..writeln('Cashier: $cashierName');
     if (orderType != null && orderType!.isNotEmpty) {
-      buffer.writeln('Type: $orderType');
+      buffer.writeln('Type: ${_label(orderType!)}');
     }
     if (customerName != null && customerName!.isNotEmpty) {
       buffer.writeln('Customer: $customerName');
@@ -140,42 +143,63 @@ class ReceiptData {
     }
     buffer
       ..writeln(separator)
-      ..writeln('Subtotal     $subtotal')
-      ..writeln('Discount     $discount')
-      ..writeln('Tax          $tax')
-      ..writeln('TOTAL        $total');
+      ..writeln(_moneyRow('Subtotal', subtotal))
+      ..writeln(_moneyRow('Discount', discount))
+      ..writeln(_moneyRow('Tax', tax))
+      ..writeln(_moneyRow('TOTAL', total));
     if (tendered != null && tendered!.isNotEmpty) {
-      buffer.writeln('Tendered     $tendered');
+      buffer.writeln(_moneyRow('Tendered', tendered!));
     }
     if (change != null && change!.isNotEmpty) {
-      buffer.writeln('Change       $change');
+      buffer.writeln(_moneyRow('Change', change!));
     }
     if (footer != null && footer!.isNotEmpty) {
       buffer.writeln(footer);
     }
     return buffer.toString();
   }
+
+  int get columns => paperWidthMm <= 58 ? 32 : 48;
+
+  String _moneyRow(String label, String amount) {
+    final width = columns;
+    final gap = width - label.length - amount.length;
+    if (gap < 1) return '$label $amount';
+    return '$label${' ' * gap}$amount';
+  }
+
+  String _label(String value) => value.replaceAll('_', ' ');
+}
+
+class PrinterNotConfiguredException implements Exception {
+  @override
+  String toString() => 'No thermal printer selected. Choose one in Receipt Settings.';
 }
 
 abstract class PrinterService {
   Future<void> printReceipt(ReceiptData receipt);
+  Future<List<String>> availablePrinters();
+  String? get configuredPrinter;
+  Future<void> configurePrinter(String? name);
 }
 
 class EscPosEncoder {
   Uint8List encode(ReceiptData receipt) {
     final bytes = <int>[
-      0x1B, 0x40, // initialize
-      0x1B, 0x61, 0x01, // center
+      0x1B, 0x40,
+      0x1B, 0x74, 0x00,
+      0x1B, 0x61, 0x01,
+      0x1B, 0x45, 0x01,
+      0x1D, 0x21, 0x11,
     ];
     void line(String text) {
-      bytes.addAll(text.codeUnits);
-      bytes.addAll([0x0A]);
+      bytes.addAll(_latin1(text));
+      bytes.add(0x0A);
     }
 
     line(receipt.titleLine);
-    if (receipt.branchName.isNotEmpty) {
-      line(receipt.branchName);
-    }
+    bytes.addAll([0x1D, 0x21, 0x00, 0x1B, 0x45, 0x00]);
+    if (receipt.branchName.isNotEmpty) line(receipt.branchName);
     if (receipt.showAddress && receipt.address != null && receipt.address!.isNotEmpty) {
       line(receipt.address!);
     }
@@ -185,36 +209,84 @@ class EscPosEncoder {
     bytes.addAll([0x1B, 0x61, 0x00]);
     line(receipt.separator);
     line('Order: ${receipt.orderNumber}');
-    line('Date: ${receipt.createdAt.toLocal()}');
+    line('Date: ${_stamp(receipt.createdAt)}');
     line('Cashier: ${receipt.cashierName}');
+    if (receipt.orderType != null && receipt.orderType!.isNotEmpty) {
+      line('Type: ${receipt.orderType!.replaceAll('_', ' ')}');
+    }
+    if (receipt.customerName != null && receipt.customerName!.isNotEmpty) {
+      line('Customer: ${receipt.customerName}');
+    }
+    if (receipt.tableNo != null && receipt.tableNo!.isNotEmpty) {
+      line('Table: ${receipt.tableNo}');
+    }
+    line('Paid: ${receipt.paymentMethod}');
     line(receipt.separator);
     for (final item in receipt.lines) {
-      line('${item.quantity} x ${item.name}');
-      line('  ${item.unitPrice}    ${item.lineTotal}');
+      line(_fit('${item.quantity} x ${item.name}', receipt.columns));
+      line(receipt._moneyRow(item.unitPrice, item.lineTotal));
     }
     line(receipt.separator);
-    line('Subtotal     ${receipt.subtotal}');
-    line('Discount     ${receipt.discount}');
-    line('Tax          ${receipt.tax}');
-    line('TOTAL        ${receipt.total}');
-    line('Paid         ${receipt.paymentMethod}');
-    line(receipt.separator);
+    line(receipt._moneyRow('Subtotal', receipt.subtotal));
+    line(receipt._moneyRow('Discount', receipt.discount));
+    line(receipt._moneyRow('Tax', receipt.tax));
+    bytes.addAll([0x1B, 0x45, 0x01]);
+    line(receipt._moneyRow('TOTAL', receipt.total));
+    bytes.addAll([0x1B, 0x45, 0x00]);
+    if (receipt.tendered != null && receipt.tendered!.isNotEmpty) {
+      line(receipt._moneyRow('Tendered', receipt.tendered!));
+    }
+    if (receipt.change != null && receipt.change!.isNotEmpty) {
+      line(receipt._moneyRow('Change', receipt.change!));
+    }
     if (receipt.footer != null && receipt.footer!.trim().isNotEmpty) {
+      line(receipt.separator);
       bytes.addAll([0x1B, 0x61, 0x01]);
-      line(receipt.footer!);
+      for (final part in receipt.footer!.split('\n')) {
+        if (part.trim().isNotEmpty) line(part.trim());
+      }
     }
-    bytes.addAll([0x0A, 0x0A, 0x1D, 0x56, 0x41, 0x10]);
+    bytes.addAll([0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x41, 0x10]);
     return Uint8List.fromList(bytes);
+  }
+
+  List<int> _latin1(String text) {
+    return text.runes.map((rune) => rune <= 0xFF ? rune : 0x3F).toList();
+  }
+
+  String _fit(String text, int width) {
+    if (text.length <= width) return text;
+    return text.substring(0, width);
+  }
+
+  String _stamp(DateTime value) {
+    final local = value.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${local.year}-${two(local.month)}-${two(local.day)} ${two(local.hour)}:${two(local.minute)}';
   }
 }
 
-class PreviewPrinterService implements PrinterService {
-  PreviewPrinterService(this._encoder);
+class ThermalPrinterService implements PrinterService {
+  ThermalPrinterService(this._encoder, this._settings, {RawPrinter? transport})
+      : _transport = transport ?? createRawPrinter();
+
   final EscPosEncoder _encoder;
-  Uint8List? lastBytes;
+  final PrinterSettingsStore _settings;
+  final RawPrinter _transport;
+
+  @override
+  String? get configuredPrinter => _settings.selectedPrinter;
+
+  @override
+  Future<List<String>> availablePrinters() async => _transport.listPrinters();
+
+  @override
+  Future<void> configurePrinter(String? name) => _settings.save(name);
 
   @override
   Future<void> printReceipt(ReceiptData receipt) async {
-    lastBytes = _encoder.encode(receipt);
+    final printer = _settings.selectedPrinter ?? _transport.defaultPrinter();
+    if (printer == null || printer.isEmpty) throw PrinterNotConfiguredException();
+    _transport.send(printer, _encoder.encode(receipt));
   }
 }

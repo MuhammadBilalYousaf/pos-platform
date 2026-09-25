@@ -20,6 +20,7 @@ import '../../features/pos/presentation/bloc/cart_cubit.dart';
 import '../../features/pos/presentation/bloc/order_cubit.dart';
 import '../../features/orders/data/repositories/order_repository.dart';
 import '../../features/orders/data/repositories/held_ticket_repository.dart';
+import '../../features/printing/data/printer_settings_store.dart';
 import '../../features/printing/domain/printer_service.dart';
 import '../../features/sync/presentation/bloc/sync_cubit.dart';
 import '../../features/dashboard/data/dashboard_repository.dart';
@@ -84,7 +85,8 @@ Future<void> configureDependencies() async {
   sl.registerFactory(() => CartCubit(Hive.box(HiveBoxes.heldTickets), sl()));
 
   sl.registerLazySingleton(() => OrderRepository(sl(), sl(), Hive.box(HiveBoxes.pendingOrders)));
-  sl.registerLazySingleton<PrinterService>(() => PreviewPrinterService(EscPosEncoder()));
+  sl.registerLazySingleton(() => PrinterSettingsStore(Hive.box(HiveBoxes.session)));
+  sl.registerLazySingleton<PrinterService>(() => ThermalPrinterService(EscPosEncoder(), sl()));
   sl.registerFactory(() => OrderCubit(sl(), sl()));
   sl.registerFactory(() => SyncCubit(sl()));
   sl.registerLazySingleton(() => DashboardRepository(sl(), sl()));

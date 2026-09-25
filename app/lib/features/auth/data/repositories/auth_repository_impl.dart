@@ -1,3 +1,7 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+
 import '../../domain/entities/session.dart';
 import '../../domain/repositories/auth_repository.dart';
 import '../datasources/firebase_auth_datasource.dart';
@@ -26,12 +30,23 @@ class AuthRepositoryImpl implements AuthRepository {
   }
 
   @override
-  Future<Session> loadSession() {
+  Future<Session> loadSession() async {
     final user = _firebase.currentUser;
     if (user == null) {
       throw const Failure('Not signed in.');
     }
-    return _session.load(uid: user.uid, email: user.email ?? '');
+    if (!kIsWeb && Platform.isWindows) {
+      await user.getIdToken(true);
+    }
+    try {
+      return await _session.load(uid: user.uid, email: user.email ?? '');
+    } on Failure catch (error) {
+      if (error.code != 'PERMISSION' || kIsWeb || !Platform.isWindows) {
+        rethrow;
+      }
+      await user.getIdToken(true);
+      return _session.load(uid: user.uid, email: user.email ?? '');
+    }
   }
 
   @override

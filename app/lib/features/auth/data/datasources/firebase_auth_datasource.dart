@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import '../../../../core/errors/failures.dart';
 import '../../../../core/firebase/firestore_host.dart';
 import '../../../../config/firebase/firebase_options.dart';
@@ -23,9 +26,17 @@ class FirebaseAuthDataSource {
 
   User? get currentUser => _auth?.currentUser;
 
+  Future<void> _bindWindowsAuth(User? user) async {
+    if (kIsWeb || !Platform.isWindows || user == null) {
+      return;
+    }
+    await user.getIdToken(true);
+  }
+
   Future<void> signIn(String email, String password) async {
     try {
-      await _require().signInWithEmailAndPassword(email: email, password: password);
+      final credential = await _require().signInWithEmailAndPassword(email: email, password: password);
+      await _bindWindowsAuth(credential.user);
     } catch (error) {
       throw mapFirebaseFailure(error);
     }
@@ -33,7 +44,8 @@ class FirebaseAuthDataSource {
 
   Future<void> createOwnerAccount(String email, String password) async {
     try {
-      await _require().createUserWithEmailAndPassword(email: email, password: password);
+      final credential = await _require().createUserWithEmailAndPassword(email: email, password: password);
+      await _bindWindowsAuth(credential.user);
     } on FirebaseAuthException catch (error) {
       if (error.code == 'email-already-in-use') {
         throw const Failure('That email already exists. Super Admin signup needs a new email.');
@@ -47,7 +59,8 @@ class FirebaseAuthDataSource {
   Future<void> createOrSignIn(String email, String password) async {
     final auth = _require();
     try {
-      await auth.createUserWithEmailAndPassword(email: email, password: password);
+      final credential = await auth.createUserWithEmailAndPassword(email: email, password: password);
+      await _bindWindowsAuth(credential.user);
     } on FirebaseAuthException catch (error) {
       if (error.code == 'email-already-in-use') {
         await signIn(email, password);

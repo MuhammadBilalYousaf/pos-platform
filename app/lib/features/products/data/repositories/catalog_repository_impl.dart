@@ -16,19 +16,50 @@ class CatalogRepositoryImpl implements CatalogRepository {
   final TenantContext _tenant;
   final Box<dynamic> _box;
 
+  String _cacheKey(String businessId) => 'pos_catalog_$businessId';
+
+  PosCatalog? _catalogForBusiness(Object? raw, String businessId) {
+    if (raw is! Map) {
+      return null;
+    }
+    final stored = asStringKeyMap(raw);
+    if (readString(stored, ['businessId', 'business_id']) != businessId) {
+      return null;
+    }
+    final body = stored['catalog'];
+    if (body is! Map) {
+      return null;
+    }
+    try {
+      return PosCatalog.fromJson(asStringKeyMap(body));
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   Future<PosCatalog> load({bool forceRefresh = false}) async {
-    final cached = _box.get('pos_catalog');
-    if (!forceRefresh && cached is Map) {
-      try {
-        return PosCatalog.fromJson(asStringKeyMap(cached));
-      } catch (_) {}
+    final businessId = _tenant.requireBusinessId();
+    final key = _cacheKey(businessId);
+    final cached = _box.get(key);
+    // Drop the old shared cache. It showed one business's menu inside another.
+    await _box.delete('pos_catalog');
+    if (!forceRefresh) {
+      final cachedCatalog = _catalogForBusiness(cached, businessId);
+      if (cachedCatalog != null) {
+        return cachedCatalog;
+      }
     }
     try {
       final db = _firestore.requireDb();
-      final businessId = _tenant.requireBusinessId();
       final business = db.collection('businesses').doc(businessId);
-      final categoriesSnap = await business.collection('categories').orderBy('sort_order').get();
+      final categoriesSnap = await () async {
+        try {
+          return await business.collection('categories').orderBy('sort_order').get();
+        } catch (_) {
+          return business.collection('categories').get();
+        }
+      }();
       final productsSnap = await business.collection('products').get();
       final catalog = PosCatalog(
         categories: categoriesSnap.docs.map((doc) {
@@ -42,11 +73,15 @@ class CatalogRepositoryImpl implements CatalogRepository {
           return CatalogProduct.fromJson(data);
         }).toList(),
       );
-      await _box.put('pos_catalog', catalog.toJson());
+      await _box.put(key, {
+        'businessId': businessId,
+        'catalog': catalog.toJson(),
+      });
       return catalog;
     } catch (error) {
-      if (cached is Map) {
-        return PosCatalog.fromJson(asStringKeyMap(cached));
+      final cachedCatalog = _catalogForBusiness(cached, businessId);
+      if (cachedCatalog != null) {
+        return cachedCatalog;
       }
       throw mapFirebaseFailure(error);
     }

@@ -1,5 +1,10 @@
+import 'dart:io';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'config/dependency_injection/injection.dart';
@@ -18,6 +23,12 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   if (DefaultFirebaseOptions.isConfigured) {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+    if (!kIsWeb && Platform.isWindows) {
+      // The Windows release SDK drops the login token unless Auth is
+      // listened to first, and its disk cache aborts sale transactions.
+      FirebaseAuth.instance.idTokenChanges().listen((_) {});
+      FirebaseFirestore.instance.settings = const Settings(persistenceEnabled: false);
+    }
   }
   await configureDependencies();
   runApp(const PosApp());
@@ -80,7 +91,7 @@ class _PosAppState extends State<PosApp> {
           if (state is AuthAuthenticated && !state.session.user.isPlatformAdmin) {
             _branchContext.bind(state.session);
             _cartCubit.setTaxRate(state.session.business?.taxRate ?? '0');
-            _catalogCubit.load();
+            _catalogCubit.load(forceRefresh: true);
           }
           if (state is AuthUnauthenticated) {
             _branchContext.clear();

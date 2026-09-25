@@ -25,6 +25,9 @@ class _ReceiptEditorPageState extends State<ReceiptEditorPage> {
   late bool _showAddress;
   late bool _showPhone;
   bool _busy = false;
+  bool _printing = false;
+  List<String> _printers = const [];
+  String? _printer;
 
   @override
   void initState() {
@@ -39,6 +42,37 @@ class _ReceiptEditorPageState extends State<ReceiptEditorPage> {
     _showPhone = business?.receiptShowPhone ?? true;
     for (final controller in [_header, _footer, _address, _phone]) {
       controller.addListener(() => setState(() {}));
+    }
+    _loadPrinters();
+  }
+
+  Future<void> _loadPrinters() async {
+    final service = sl<PrinterService>();
+    final printers = await service.availablePrinters();
+    if (!mounted) return;
+    setState(() {
+      _printers = printers;
+      _printer = service.configuredPrinter;
+    });
+  }
+
+  Future<void> _selectPrinter(String? name) async {
+    await sl<PrinterService>().configurePrinter(name);
+    if (!mounted) return;
+    setState(() => _printer = name);
+  }
+
+  Future<void> _testPrint() async {
+    setState(() => _printing = true);
+    try {
+      await sl<PrinterService>().printReceipt(_preview);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Test receipt sent to the printer.')));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+    } finally {
+      if (mounted) setState(() => _printing = false);
     }
   }
 
@@ -152,6 +186,36 @@ class _ReceiptEditorPageState extends State<ReceiptEditorPage> {
             value: _showPhone,
             onChanged: (value) => setState(() => _showPhone = value),
           ),
+          const SizedBox(height: 8),
+          Text('Thermal printer', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          InputDecorator(
+            decoration: adminInputDecoration('Windows printer'),
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                isExpanded: true,
+                value: _printers.contains(_printer) ? _printer : null,
+                hint: const Text('Select installed printer'),
+                items: [
+                  for (final name in _printers) DropdownMenuItem(value: name, child: Text(name)),
+                ],
+                onChanged: _selectPrinter,
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton(
+              onPressed: _printing || _printer == null ? null : _testPrint,
+              child: Text(_printing ? 'Printing…' : 'Print test receipt'),
+            ),
+          ),
+          if (_printers.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: Text('Install the thermal printer in Windows, then reopen this page.'),
+            ),
         ],
       ),
     );

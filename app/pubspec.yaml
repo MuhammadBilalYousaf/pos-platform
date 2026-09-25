@@ -24,6 +24,8 @@ dependencies:
   intl: ^0.20.2
   decimal: ^2.3.3
   fl_chart: ^1.2.0
+  ffi: ^2.1.4
+  win32: ^5.15.0
 
 dev_dependencies:
   flutter_test:
