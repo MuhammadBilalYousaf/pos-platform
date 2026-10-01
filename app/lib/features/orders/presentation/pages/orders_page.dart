@@ -246,6 +246,42 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
               },
               child: const Text('Cancel order'),
             ),
+          if (auth is AuthAuthenticated &&
+              (auth.session.user.can(PosPermissions.orderCancel) ||
+                  auth.session.user.can(PosPermissions.ordersRefund)) &&
+              readString(row, ['status'], 'COMPLETED').toUpperCase() == 'COMPLETED')
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(context);
+                try {
+                  await sl<OrderRepository>().cancelCompletedSale(readString(row, ['id']));
+                  await _load();
+                } catch (error) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+                  }
+                }
+              },
+              child: const Text('Cancel completed sale'),
+            ),
+          TextButton(
+            onPressed: () {
+              showDialog<void>(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('Cancel vs waste'),
+                  content: const Text(
+                    'Cancel order: ticket was not completed. Stock stays as it is.\n\n'
+                    'Cancel completed sale: ticket was paid by mistake and stock should come back. Money is not refunded.\n\n'
+                    'Refund: money goes back. Full refund can also restore stock.\n\n'
+                    'Waste (Inventory): food or ingredients were thrown away, including a partial quantity. Stock goes down.',
+                  ),
+                  actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
+                ),
+              );
+            },
+            child: const Text('When to use each'),
+          ),
           TextButton(
             onPressed: () {
               context.read<OrderCubit>().reprint(receipt);

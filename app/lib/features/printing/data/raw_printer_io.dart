@@ -15,6 +15,9 @@ class _WindowsRawPrinter implements RawPrinter {
   String? defaultPrinter() => _printer.defaultPrinter();
 
   @override
+  String? pluggedInWithoutDriver() => _printer.pluggedInWithoutDriver();
+
+  @override
   void send(String printerName, List<int> bytes) => _printer.send(printerName, bytes);
 }
 

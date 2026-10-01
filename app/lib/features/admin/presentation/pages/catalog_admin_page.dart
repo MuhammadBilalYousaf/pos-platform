@@ -18,6 +18,12 @@ class CatalogAdminPage extends StatelessWidget {
       actions: [
         OutlinedButton(
           style: adminOutlinedButtonStyle,
+          onPressed: () => _bulkPrice(context),
+          child: const Text('Bulk price'),
+        ),
+        const SizedBox(width: 8),
+        OutlinedButton(
+          style: adminOutlinedButtonStyle,
           onPressed: () => _addCategory(context),
           child: const Text('Add category'),
         ),
@@ -120,21 +126,136 @@ class CatalogAdminPage extends StatelessWidget {
   }
 
   Future<void> _addCategory(BuildContext context) async {
+    final catalog = context.read<CatalogCubit>().state.catalog;
     final name = TextEditingController();
+    String? parentId;
     final ok = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Category'),
-        content: TextField(controller: name, decoration: const InputDecoration(labelText: 'Name')),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
-        ],
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          title: const Text('Category'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: name, decoration: const InputDecoration(labelText: 'Name')),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String?>(
+                initialValue: parentId,
+                decoration: const InputDecoration(labelText: 'Parent category'),
+                items: [
+                  const DropdownMenuItem<String?>(value: null, child: Text('None (top level)')),
+                  for (final category in (catalog?.categories ?? const <CatalogCategory>[]).where((item) => !item.isSubcategory))
+                    DropdownMenuItem<String?>(value: category.id, child: Text(category.name)),
+                ],
+                onChanged: (value) => setLocal(() => parentId = value),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+          ],
+        ),
       ),
     );
     if (ok != true || !context.mounted) return;
-    await sl<AdminRepository>().saveCategory(CatalogCategory(id: '', name: name.text.trim(), sortOrder: 0));
+    await sl<AdminRepository>().saveCategory(
+      CatalogCategory(id: '', name: name.text.trim(), sortOrder: 0, parentId: parentId),
+    );
     if (context.mounted) context.read<CatalogCubit>().load(forceRefresh: true);
+  }
+
+  Future<void> _bulkPrice(BuildContext context) async {
+    final catalog = context.read<CatalogCubit>().state.catalog;
+    if (catalog == null || catalog.products.isEmpty) return;
+    final price = TextEditingController();
+    String? categoryId;
+    final selected = <String>{};
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocal) {
+          final pool = catalog.products.where((product) {
+            if (categoryId == null || categoryId!.isEmpty) return true;
+            if (product.categoryId == categoryId) return true;
+            return catalog.categories.any((item) => item.id == product.categoryId && item.parentId == categoryId);
+          }).toList();
+          return AlertDialog(
+            title: const Text('Bulk price'),
+            content: SizedBox(
+              width: 480,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DropdownButtonFormField<String?>(
+                    initialValue: categoryId,
+                    decoration: const InputDecoration(labelText: 'Category or sub-category'),
+                    items: [
+                      const DropdownMenuItem<String?>(value: null, child: Text('All products')),
+                      for (final category in catalog.categories)
+                        DropdownMenuItem<String?>(
+                          value: category.id,
+                          child: Text(category.isSubcategory ? '— ${category.name}' : category.name),
+                        ),
+                    ],
+                    onChanged: (value) => setLocal(() {
+                      categoryId = value;
+                      selected
+                        ..clear()
+                        ..addAll(pool.where((product) {
+                          if (value == null) return false;
+                          if (product.categoryId == value) return true;
+                          return catalog.categories.any((item) => item.id == product.categoryId && item.parentId == value);
+                        }).map((product) => product.id));
+                    }),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(controller: price, decoration: const InputDecoration(labelText: 'New price')),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('${selected.length} products will be updated. Every size on those products gets this price.'),
+                  ),
+                  SizedBox(
+                    height: 180,
+                    child: ListView(
+                      children: [
+                        for (final product in pool)
+                          CheckboxListTile(
+                            dense: true,
+                            value: selected.contains(product.id),
+                            title: Text(product.name),
+                            onChanged: (value) => setLocal(() {
+                              if (value == true) {
+                                selected.add(product.id);
+                              } else {
+                                selected.remove(product.id);
+                              }
+                            }),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+              FilledButton(
+                onPressed: selected.isEmpty ? null : () => Navigator.pop(context, true),
+                child: const Text('Apply'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    final count = await sl<AdminRepository>().applyBulkPrice(productIds: selected.toList(), price: price.text.trim());
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Updated $count products.')));
+      context.read<CatalogCubit>().load(forceRefresh: true);
+    }
   }
 
   Future<void> _addProduct(BuildContext context, {CatalogProduct? product}) async {
@@ -161,10 +282,12 @@ extension on CatalogProduct {
 }
 
 class _DraftRow {
-  _DraftRow({required this.name, required this.price, this.id = '', this.isDefault = false});
+  _DraftRow({required this.name, required this.price, this.id = '', this.isDefault = false, String multiplier = '1'})
+      : multiplier = TextEditingController(text: multiplier);
   final String id;
   final TextEditingController name;
   final TextEditingController price;
+  final TextEditingController multiplier;
   bool isDefault;
 }
 
@@ -203,6 +326,7 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
             name: TextEditingController(text: variant.name),
             price: TextEditingController(text: variant.price),
             isDefault: variant.isDefault,
+            multiplier: variant.recipeMultiplier,
           )
       else
         _DraftRow(name: TextEditingController(text: 'Regular'), price: TextEditingController(text: '0'), isDefault: true),
@@ -225,6 +349,7 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
     for (final row in [..._variants, ..._options]) {
       row.name.dispose();
       row.price.dispose();
+      row.multiplier.dispose();
     }
     super.dispose();
   }
@@ -249,7 +374,10 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
                 decoration: const InputDecoration(labelText: 'Category'),
                 items: [
                   for (final category in widget.catalog.categories)
-                    DropdownMenuItem(value: category.id, child: Text(category.name)),
+                    DropdownMenuItem(
+                      value: category.id,
+                      child: Text(category.isSubcategory ? '${category.name} (sub)' : category.name),
+                    ),
                 ],
                 onChanged: (value) {
                   if (value != null) setState(() => _categoryId = value);
@@ -295,7 +423,7 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
                       ),
                       const SizedBox(width: 8),
                       SizedBox(
-                        width: 110,
+                        width: 90,
                         child: TextField(controller: _variants[index].price, decoration: const InputDecoration(labelText: 'Price')),
                       ),
                       Checkbox(
@@ -364,6 +492,7 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
                     name: row.name.text.trim(),
                     price: row.price.text.trim().isEmpty ? '0' : row.price.text.trim(),
                     isDefault: row.isDefault,
+                    recipeMultiplier: row.multiplier.text.trim().isEmpty ? '1' : row.multiplier.text.trim(),
                   ),
             ];
             await sl<AdminRepository>().saveProduct(

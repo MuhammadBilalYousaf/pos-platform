@@ -1,6 +1,7 @@
 abstract class RawPrinter {
   List<String> listPrinters();
   String? defaultPrinter();
+  String? pluggedInWithoutDriver();
   void send(String printerName, List<int> bytes);
 }
 
@@ -12,6 +13,9 @@ class UnsupportedRawPrinter implements RawPrinter {
 
   @override
   String? defaultPrinter() => null;
+
+  @override
+  String? pluggedInWithoutDriver() => null;
 
   @override
   void send(String printerName, List<int> bytes) {

@@ -2,21 +2,36 @@ import 'package:equatable/equatable.dart';
 import '../../../../core/utils/json_read.dart';
 
 class CatalogCategory extends Equatable {
-  const CatalogCategory({required this.id, required this.name, required this.sortOrder});
+  const CatalogCategory({
+    required this.id,
+    required this.name,
+    required this.sortOrder,
+    this.parentId,
+  });
 
   final String id;
   final String name;
   final int sortOrder;
+  final String? parentId;
+
+  bool get isSubcategory => parentId != null && parentId!.isNotEmpty;
 
   factory CatalogCategory.fromJson(Map<String, dynamic> json) {
+    final parent = readString(json, ['parent_id', 'parentId']);
     return CatalogCategory(
       id: readString(json, ['id']),
       name: readString(json, ['name']),
       sortOrder: readInt(json, ['sort_order', 'sortOrder']),
+      parentId: parent.isEmpty ? null : parent,
     );
   }
 
-  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'sort_order': sortOrder};
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'sort_order': sortOrder,
+        if (parentId != null && parentId!.isNotEmpty) 'parent_id': parentId,
+      };
 
   @override
   List<Object?> get props => [id];
@@ -49,6 +64,7 @@ class ProductVariant extends Equatable {
     required this.name,
     required this.price,
     required this.isDefault,
+    this.recipeMultiplier = '1',
   });
 
   final String id;
@@ -56,12 +72,16 @@ class ProductVariant extends Equatable {
   final String price;
   final bool isDefault;
 
+  /// How many times the base recipe is consumed when this size is sold.
+  final String recipeMultiplier;
+
   factory ProductVariant.fromJson(Map<String, dynamic> json) {
     return ProductVariant(
       id: readString(json, ['id']),
       name: readString(json, ['name']),
       price: readString(json, ['price'], '0'),
       isDefault: readBool(json, ['is_default', 'isDefault']),
+      recipeMultiplier: readString(json, ['recipe_multiplier', 'recipeMultiplier'], '1'),
     );
   }
 
@@ -70,6 +90,7 @@ class ProductVariant extends Equatable {
         'name': name,
         'price': price,
         'is_default': isDefault,
+        'recipe_multiplier': recipeMultiplier,
       };
 
   @override

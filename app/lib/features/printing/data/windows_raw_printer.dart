@@ -1,4 +1,5 @@
 import 'dart:ffi';
+import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 import 'package:win32/win32.dart';
@@ -33,6 +34,12 @@ class WindowsRawPrinter {
           if (name.isNotEmpty) names.add(name);
         }
         names.sort();
+        final ports = listComPorts();
+        for (final port in ports) {
+          if (!names.any((name) => name.toUpperCase() == port.toUpperCase())) {
+            names.add(port);
+          }
+        }
         return names;
       } finally {
         calloc.free(buffer);
@@ -40,6 +47,54 @@ class WindowsRawPrinter {
     } finally {
       calloc.free(needed);
       calloc.free(returned);
+    }
+  }
+
+  List<String> listComPorts() {
+    try {
+      final result = Process.runSync('reg', [
+        'query',
+        r'HKLM\HARDWARE\DEVICEMAP\SERIALCOMM',
+      ]);
+      if (result.exitCode != 0) return const [];
+      final ports = <String>{};
+      final pattern = RegExp(r'\b(COM\d+)\b', caseSensitive: false);
+      for (final match in pattern.allMatches('${result.stdout}')) {
+        ports.add(match.group(1)!.toUpperCase());
+      }
+      final sorted = ports.toList()..sort();
+      return sorted;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  String? pluggedInWithoutDriver() {
+    try {
+      final result = Process.runSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-Command',
+          r"Get-PnpDevice -PresentOnly -Class Printer,USB | Where-Object { $_.FriendlyName -match 'print|POS|thermal|receipt|Xprinter|Epson|Gprinter|Rongta' } | ForEach-Object { $_.Status + '|' + $_.FriendlyName }",
+        ],
+      );
+      if (result.exitCode != 0) return null;
+      final lines = '${result.stdout}'.split('\n').map((line) => line.trim()).where((line) => line.contains('|'));
+      final problems = <String>[];
+      for (final line in lines) {
+        final parts = line.split('|');
+        final status = parts.first.toLowerCase();
+        final name = parts.sublist(1).join('|').trim();
+        if (name.isEmpty) continue;
+        if (status == 'error' || status == 'unknown' || status == 'degraded') {
+          problems.add(name);
+        }
+      }
+      if (problems.isEmpty) return null;
+      return 'Windows sees ${problems.join(', ')} but it has no working printer driver. Install that driver in Windows Settings, then scan again.';
+    } catch (_) {
+      return null;
     }
   }
 
@@ -62,6 +117,10 @@ class WindowsRawPrinter {
   }
 
   void send(String printerName, List<int> bytes) {
+    if (RegExp(r'^COM\d+$', caseSensitive: false).hasMatch(printerName.trim())) {
+      _sendToPort(r'\\.\${printerName.trim().toUpperCase()}', bytes);
+      return;
+    }
     final namePtr = printerName.toNativeUtf16();
     final printer = calloc<IntPtr>();
     final docName = 'POS Receipt'.toNativeUtf16();
@@ -102,6 +161,40 @@ class WindowsRawPrinter {
       calloc.free(docName);
       calloc.free(dataType);
       calloc.free(printer);
+      calloc.free(namePtr);
+    }
+  }
+
+  void _sendToPort(String path, List<int> bytes) {
+    final namePtr = path.toNativeUtf16();
+    final data = calloc<Uint8>(bytes.length);
+    final written = calloc<DWORD>();
+    try {
+      final handle = CreateFile(
+        namePtr,
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        0,
+      );
+      if (handle == 0 || handle == -1) {
+        throw StateError('Could not open $path (${GetLastError()})');
+      }
+      try {
+        for (var i = 0; i < bytes.length; i++) {
+          data[i] = bytes[i];
+        }
+        if (WriteFile(handle, data, bytes.length, written, nullptr) == 0 || written.value != bytes.length) {
+          throw StateError('Could not write the receipt to $path (${GetLastError()})');
+        }
+      } finally {
+        CloseHandle(handle);
+      }
+    } finally {
+      calloc.free(written);
+      calloc.free(data);
       calloc.free(namePtr);
     }
   }

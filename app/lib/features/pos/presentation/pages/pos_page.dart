@@ -143,6 +143,40 @@ class _SearchBar extends StatelessWidget {
 class _VerticalCategories extends StatelessWidget {
   const _VerticalCategories();
 
+  List<Widget> _categoryButtons(BuildContext context, CatalogState state, List<CatalogCategory> categories) {
+    final buttons = <Widget>[
+      _PosCategoryButton(
+        label: 'All',
+        selected: state.selectedCategoryId == null,
+        onTap: () => context.read<CatalogCubit>().selectCategory(null),
+      ),
+    ];
+    for (final category in categories) {
+      if (category.isSubcategory) continue;
+      buttons.add(
+        _PosCategoryButton(
+          label: category.name,
+          selected: state.selectedCategoryId == category.id,
+          onTap: () => context.read<CatalogCubit>().selectCategory(category.id),
+        ),
+      );
+      final showChildren = state.selectedCategoryId == category.id ||
+          categories.any((item) => item.id == state.selectedCategoryId && item.parentId == category.id);
+      if (!showChildren) continue;
+      for (final child in categories) {
+        if (child.parentId != category.id) continue;
+        buttons.add(
+          _PosCategoryButton(
+            label: child.name,
+            selected: state.selectedCategoryId == child.id,
+            onTap: () => context.read<CatalogCubit>().selectCategory(child.id),
+          ),
+        );
+      }
+    }
+    return buttons;
+  }
+
   @override
   Widget build(BuildContext context) {
     return BlocBuilder<CatalogCubit, CatalogState>(
@@ -157,19 +191,7 @@ class _VerticalCategories extends StatelessWidget {
             constraints: const BoxConstraints(maxHeight: 240),
             child: ListView(
               shrinkWrap: true,
-              children: [
-                _PosCategoryButton(
-                  label: 'All',
-                  selected: state.selectedCategoryId == null,
-                  onTap: () => context.read<CatalogCubit>().selectCategory(null),
-                ),
-                for (final category in categories)
-                  _PosCategoryButton(
-                    label: category.name,
-                    selected: state.selectedCategoryId == category.id,
-                    onTap: () => context.read<CatalogCubit>().selectCategory(category.id),
-                  ),
-              ],
+              children: _categoryButtons(context, state, categories),
             ),
           ),
         );

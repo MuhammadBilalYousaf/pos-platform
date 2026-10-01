@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../config/dependency_injection/injection.dart';
+import '../../../../core/utils/stock_units.dart';
 import '../../../../core/widgets/workbench.dart';
 import '../../../../core/widgets/admin_ui_kit.dart';
 import '../../data/admin_repository.dart';
@@ -48,14 +49,92 @@ class _InventoryAdminPageState extends State<InventoryAdminPage> {
     }
   }
 
+  Future<void> _edit(InventoryItem item) async {
+    final name = TextEditingController(text: item.name);
+    final qty = TextEditingController(text: item.quantity);
+    final reorder = TextEditingController(text: item.reorderLevel);
+    var unit = StockUnits.normalize(item.unit);
+    var kind = item.kind == 'MIXTURE' ? 'MIXTURE' : 'INGREDIENT';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          title: const Text('Edit stock item'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(controller: name, decoration: const InputDecoration(labelText: 'Name')),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: TextEditingController(text: item.sku ?? ''),
+                  readOnly: true,
+                  decoration: const InputDecoration(labelText: 'SKU', helperText: 'SKU stays the same so recipes keep pointing at this item'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: unit,
+                  decoration: const InputDecoration(labelText: 'Stock unit'),
+                  items: [for (final choice in StockUnits.choices) DropdownMenuItem(value: choice, child: Text(choice))],
+                  onChanged: (value) {
+                    if (value != null) setLocal(() => unit = value);
+                  },
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: kind,
+                  decoration: const InputDecoration(labelText: 'Kind'),
+                  items: const [
+                    DropdownMenuItem(value: 'INGREDIENT', child: Text('Ingredient')),
+                    DropdownMenuItem(value: 'MIXTURE', child: Text('Mixture / preparation')),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) setLocal(() => kind = value);
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextField(controller: qty, decoration: InputDecoration(labelText: 'On hand ($unit)')),
+                const SizedBox(height: 12),
+                TextField(controller: reorder, decoration: InputDecoration(labelText: 'Minimum stock ($unit)')),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || name.text.trim().isEmpty) return;
+    try {
+      await sl<AdminRepository>().updateInventoryItem(
+        item: item,
+        name: name.text.trim(),
+        unit: unit,
+        kind: kind,
+        quantity: qty.text.trim().isEmpty ? '0' : qty.text.trim(),
+        reorderLevel: reorder.text.trim().isEmpty ? '0' : reorder.text.trim(),
+      );
+      await _load();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+    }
+  }
+
   Future<void> _add() async {
     final name = TextEditingController();
     final sku = TextEditingController();
     final qty = TextEditingController(text: '0');
     final reorder = TextEditingController(text: '0');
+    var unit = 'PCS';
+    var kind = 'INGREDIENT';
     final ok = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
         title: const Text('Ingredient / stock item'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -64,15 +143,39 @@ class _InventoryAdminPageState extends State<InventoryAdminPage> {
             const SizedBox(height: 12),
             TextField(controller: sku, decoration: const InputDecoration(labelText: 'SKU (optional)')),
             const SizedBox(height: 12),
-            TextField(controller: qty, decoration: const InputDecoration(labelText: 'Opening quantity')),
+            DropdownButtonFormField<String>(
+              initialValue: unit,
+              decoration: const InputDecoration(labelText: 'Stock unit'),
+              items: [
+                for (final choice in StockUnits.choices) DropdownMenuItem(value: choice, child: Text(choice)),
+              ],
+              onChanged: (value) {
+                if (value != null) setLocal(() => unit = value);
+              },
+            ),
             const SizedBox(height: 12),
-            TextField(controller: reorder, decoration: const InputDecoration(labelText: 'Reorder level')),
+            DropdownButtonFormField<String>(
+              initialValue: kind,
+              decoration: const InputDecoration(labelText: 'Kind'),
+              items: const [
+                DropdownMenuItem(value: 'INGREDIENT', child: Text('Ingredient')),
+                DropdownMenuItem(value: 'MIXTURE', child: Text('Mixture / preparation')),
+              ],
+              onChanged: (value) {
+                if (value != null) setLocal(() => kind = value);
+              },
+            ),
+            const SizedBox(height: 12),
+            TextField(controller: qty, decoration: InputDecoration(labelText: 'Opening quantity ($unit)')),
+            const SizedBox(height: 12),
+            TextField(controller: reorder, decoration: const InputDecoration(labelText: 'Reorder level (base unit)')),
           ],
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
           FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
         ],
+      ),
       ),
     );
     if (ok != true || name.text.trim().isEmpty) return;
@@ -82,6 +185,8 @@ class _InventoryAdminPageState extends State<InventoryAdminPage> {
         sku: sku.text.trim().isEmpty ? null : sku.text.trim(),
         quantity: qty.text.trim().isEmpty ? '0' : qty.text.trim(),
         reorderLevel: reorder.text.trim().isEmpty ? '0' : reorder.text.trim(),
+        unit: unit,
+        kind: kind,
       );
       await _load();
     } catch (error) {
@@ -115,9 +220,13 @@ class _InventoryAdminPageState extends State<InventoryAdminPage> {
     );
     if (ok != true) return;
     try {
+      final raw = delta.text.trim();
+      final negative = raw.startsWith('-');
+      final magnitude = raw.replaceFirst('-', '').trim();
+      final base = StockUnits.toBase(magnitude.isEmpty ? '0' : magnitude, item.unit);
       await sl<AdminRepository>().adjustStock(
         inventoryId: item.id,
-        delta: delta.text.trim(),
+        delta: '${negative ? '-' : ''}${base.toString()}',
         reason: reason.text.trim(),
       );
       await _load();
@@ -223,7 +332,7 @@ class _InventoryAdminPageState extends State<InventoryAdminPage> {
                 ),
               ),
               Expanded(flex: 2, child: Text(row.sku ?? 'General', maxLines: 1, overflow: TextOverflow.ellipsis)),
-              Expanded(child: const Text('PCS', style: TextStyle(fontSize: 12))),
+              Expanded(child: Text(row.unit, style: const TextStyle(fontSize: 12))),
               Expanded(child: Text(row.quantity, style: const TextStyle(fontWeight: FontWeight.w600))),
               Expanded(child: Text(row.reorderLevel, style: const TextStyle(fontSize: 12))),
               Expanded(
@@ -236,7 +345,11 @@ class _InventoryAdminPageState extends State<InventoryAdminPage> {
               Expanded(
                 child: Align(
                   alignment: Alignment.centerRight,
-                  child: IconButton(onPressed: () => _adjust(row), icon: const Icon(Icons.tune, size: 20)),
+                  child: IconButton(
+                    tooltip: 'Edit',
+                    onPressed: () => _edit(row),
+                    icon: const Icon(Icons.edit_outlined, size: 20),
+                  ),
                 ),
               ),
             ],

@@ -26,8 +26,10 @@ class _ReceiptEditorPageState extends State<ReceiptEditorPage> {
   late bool _showPhone;
   bool _busy = false;
   bool _printing = false;
+  bool _scanning = false;
   List<String> _printers = const [];
   String? _printer;
+  String? _printerNote;
 
   @override
   void initState() {
@@ -47,13 +49,33 @@ class _ReceiptEditorPageState extends State<ReceiptEditorPage> {
   }
 
   Future<void> _loadPrinters() async {
-    final service = sl<PrinterService>();
-    final printers = await service.availablePrinters();
-    if (!mounted) return;
-    setState(() {
-      _printers = printers;
-      _printer = service.configuredPrinter;
-    });
+    setState(() => _scanning = true);
+    try {
+      final service = sl<PrinterService>();
+      final printers = await service.availablePrinters();
+      final warning = service.scanWarning();
+      if (!mounted) return;
+      setState(() {
+        _printers = printers;
+        _printer = service.configuredPrinter;
+        _printerNote = warning ??
+            (printers.isEmpty
+                ? 'No printer was found. Plug in the USB printer and tap Scan printers.'
+                : 'Found ${printers.length} printer${printers.length == 1 ? '' : 's'}. Choose the thermal printer, not Print to PDF.');
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _printerNote = '$error');
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  String _printerLabel(String name) {
+    if (RegExp(r'^COM\d+$', caseSensitive: false).hasMatch(name)) {
+      return '$name (USB serial port)';
+    }
+    return name;
   }
 
   Future<void> _selectPrinter(String? name) async {
@@ -197,24 +219,36 @@ class _ReceiptEditorPageState extends State<ReceiptEditorPage> {
                 value: _printers.contains(_printer) ? _printer : null,
                 hint: const Text('Select installed printer'),
                 items: [
-                  for (final name in _printers) DropdownMenuItem(value: name, child: Text(name)),
+                  for (final name in _printers)
+                    DropdownMenuItem(
+                      value: name,
+                      child: Text(_printerLabel(name)),
+                    ),
                 ],
-                onChanged: _selectPrinter,
+                onChanged: _scanning ? null : _selectPrinter,
               ),
             ),
           ),
           const SizedBox(height: 8),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: OutlinedButton(
-              onPressed: _printing || _printer == null ? null : _testPrint,
-              child: Text(_printing ? 'Printing…' : 'Print test receipt'),
-            ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: _scanning ? null : _loadPrinters,
+                icon: const Icon(Icons.usb, size: 18),
+                label: Text(_scanning ? 'Scanning…' : 'Scan printers'),
+              ),
+              OutlinedButton(
+                onPressed: _printing || _printer == null ? null : _testPrint,
+                child: Text(_printing ? 'Printing…' : 'Print test receipt'),
+              ),
+            ],
           ),
-          if (_printers.isEmpty)
-            const Padding(
-              padding: EdgeInsets.only(top: 8),
-              child: Text('Install the thermal printer in Windows, then reopen this page.'),
+          if (_printerNote != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(_printerNote!, style: const TextStyle(color: kAdminMuted)),
             ),
         ],
       ),

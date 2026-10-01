@@ -33,6 +33,13 @@ class CatalogCubit extends Cubit<CatalogState> {
   }
 }
 
+bool _categoryMatches(PosCatalog? catalog, String productCategoryId, String? selectedId) {
+  if (selectedId == null || productCategoryId == selectedId) return selectedId == null || productCategoryId == selectedId;
+  final categories = catalog?.categories ?? const <CatalogCategory>[];
+  final childIds = categories.where((item) => item.parentId == selectedId).map((item) => item.id).toSet();
+  return childIds.contains(productCategoryId);
+}
+
 enum CatalogStatus { initial, loading, ready, failure }
 
 class CatalogState extends Equatable {
@@ -60,7 +67,7 @@ class CatalogState extends Equatable {
           (product.sku ?? '').toLowerCase().contains(q);
       final matchesCategory = searchActive ||
           selectedCategoryId == null ||
-          product.categoryId == selectedCategoryId;
+          _categoryMatches(catalog, product.categoryId, selectedCategoryId);
       return product.active && matchesCategory && matchesQuery && product.variants.isNotEmpty;
     }).toList();
   }

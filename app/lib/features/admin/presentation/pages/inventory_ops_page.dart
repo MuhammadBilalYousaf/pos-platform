@@ -207,42 +207,63 @@ class _PurchasesTabState extends State<PurchasesTab> with SingleTickerProviderSt
   }
 
   Future<void> _add() async {
-    final ingredient = TextEditingController();
+    final ingredients = await sl<AdminRepository>().listIngredients();
+    if (!mounted) return;
+    if (ingredients.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Add the stock item in Inventory first, then record the purchase.')),
+      );
+      return;
+    }
+    var ingredientId = ingredients.first.id;
+    var unit = ingredients.first.unit;
     final qty = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Purchase'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(controller: ingredient, decoration: const InputDecoration(labelText: 'Ingredient SKU')),
-            const SizedBox(height: 12),
-            TextField(controller: qty, decoration: const InputDecoration(labelText: 'Quantity received')),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          title: const Text('Purchase'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Receiving this purchase adds the quantity to current stock. You do not edit the stock by hand.'),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: ingredientId,
+                decoration: const InputDecoration(labelText: 'Stock item'),
+                items: [
+                  for (final item in ingredients)
+                    DropdownMenuItem(value: item.id, child: Text('${item.name} (${item.unit})')),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  final match = ingredients.firstWhere((item) => item.id == value);
+                  setLocal(() {
+                    ingredientId = value;
+                    unit = match.unit;
+                  });
+                },
+              ),
+              const SizedBox(height: 12),
+              TextField(controller: qty, decoration: InputDecoration(labelText: 'Quantity received ($unit)')),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Receive')),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Receive')),
-        ],
       ),
     );
     if (ok != true) return;
-    final branchId = sl<TenantContext>().requireBranchId();
-    final sku = ingredient.text.trim().toUpperCase();
-    await sl<AdminRepository>().upsertIngredient(name: sku, sku: sku, quantity: '0', reorderLevel: '0');
-    await sl<AdminRepository>().adjustStock(inventoryId: '${branchId}_$sku', delta: qty.text.trim(), reason: 'Purchase');
-    await sl<AdminRepository>().saveNamed(
-      collection: 'purchases',
-      name: sku,
-      extra: {
-        'ingredient_id': sku,
-        'quantity_base': qty.text.trim(),
-        'branch_id': branchId,
-        'status': 'Received',
-      },
-    );
-    await _load();
+    try {
+      await sl<AdminRepository>().receivePurchase(ingredientId: ingredientId, quantity: qty.text.trim());
+      await _load();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+    }
   }
 
   @override
@@ -476,32 +497,82 @@ class _WasteTabState extends State<WasteTab> {
     setState(() => _rows = rows);
   }
 
-  Future<void> _add() async {
-    final sku = TextEditingController();
-    final qty = TextEditingController();
-    final reason = TextEditingController(text: 'Waste');
-    final ok = await showDialog<bool>(
+  Future<void> _help() async {
+    await showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Waste / write-off'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(controller: sku, decoration: const InputDecoration(labelText: 'Ingredient SKU')),
-            const SizedBox(height: 12),
-            TextField(controller: qty, decoration: const InputDecoration(labelText: 'Quantity')),
-            const SizedBox(height: 12),
-            TextField(controller: reason, decoration: const InputDecoration(labelText: 'Reason')),
+        title: const Text('Cancel vs waste'),
+        content: const SizedBox(
+          width: 420,
+          child: Text(
+            'Cancel an open ticket before payment when the sale should not happen. Stock is unchanged because it is deducted only when the sale completes.\n\n'
+            'Cancel a completed sale when the ticket was a mistake and the food can go back. Stock that was deducted is restored. This does not hand cash back; use Refund for money.\n\n'
+            'Waste when product or ingredients were made and thrown away, or a partial quantity spoiled. Waste always reduces stock and records the item, quantity, unit, reason, branch, staff member, and time.',
+          ),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
+      ),
+    );
+  }
+
+  Future<void> _add() async {
+    final ingredients = await sl<AdminRepository>().listIngredients();
+    if (!mounted) return;
+    if (ingredients.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Add stock items first.')));
+      return;
+    }
+    var ingredientId = ingredients.first.id;
+    var unit = ingredients.first.unit;
+    final qty = TextEditingController();
+    final reason = TextEditingController(text: 'Spoilage');
+    final notes = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          title: const Text('Waste stock'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<String>(
+                initialValue: ingredientId,
+                decoration: const InputDecoration(labelText: 'Item'),
+                items: [
+                  for (final item in ingredients) DropdownMenuItem(value: item.id, child: Text(item.name)),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  final match = ingredients.firstWhere((item) => item.id == value);
+                  setLocal(() {
+                    ingredientId = value;
+                    unit = match.unit;
+                  });
+                },
+              ),
+              const SizedBox(height: 12),
+              TextField(controller: qty, decoration: InputDecoration(labelText: 'Quantity ($unit)')),
+              const SizedBox(height: 12),
+              TextField(controller: reason, decoration: const InputDecoration(labelText: 'Reason')),
+              const SizedBox(height: 12),
+              TextField(controller: notes, decoration: const InputDecoration(labelText: 'Notes (optional)')),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Record waste')),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Record')),
-        ],
       ),
     );
     if (ok != true) return;
-    await sl<AdminRepository>().recordWaste(ingredientId: sku.text.trim().toUpperCase(), quantity: qty.text.trim(), reason: reason.text.trim());
+    await sl<AdminRepository>().recordWaste(
+      ingredientId: ingredientId,
+      quantity: qty.text.trim(),
+      reason: reason.text.trim(),
+      unit: unit,
+      notes: notes.text.trim(),
+    );
     await _load();
   }
 
@@ -511,7 +582,16 @@ class _WasteTabState extends State<WasteTab> {
       listener: (_, __) => _load(),
       child: Column(
         children: [
-          Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: _add, icon: const Icon(Icons.remove_circle_outline), label: const Text('Waste'))),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Wrap(
+              spacing: 8,
+              children: [
+                TextButton.icon(onPressed: _help, icon: const Icon(Icons.help_outline), label: const Text('Cancel vs waste')),
+                TextButton.icon(onPressed: _add, icon: const Icon(Icons.remove_circle_outline), label: const Text('Waste')),
+              ],
+            ),
+          ),
           Expanded(
             child: ListView(
               children: [

@@ -10,6 +10,7 @@ import '../../../../core/firebase/firestore_host.dart';
 import '../../../../core/firebase/tenant_context.dart';
 import '../../../../core/storage/hive_boxes.dart';
 import '../../../../core/utils/json_read.dart';
+import '../../../../core/utils/stock_units.dart';
 import '../../../../core/utils/order_totals.dart';
 import '../../../pos/presentation/bloc/cart_cubit.dart';
 import '../../../auth/domain/permissions.dart';
@@ -548,13 +549,102 @@ class OrderRepository {
         throw const Failure('That order is not in your branch.');
       }
       final status = readString(data, ['status'], 'COMPLETED').toUpperCase();
-      if (status == 'COMPLETED' || status == 'PARTIALLY_REFUNDED') {
-        throw const Failure('Completed sales must be refunded, not cancelled.');
-      }
       if (status == 'REFUNDED' || status == 'CANCELLED') {
         throw const Failure('This order is already closed.');
       }
-      await ref.set({'status': 'CANCELLED'}, SetOptions(merge: true));
+      if (status == 'COMPLETED' || status == 'PARTIALLY_REFUNDED') {
+        throw const Failure('A completed sale is reversed with Cancel completed sale, which restores stock. Use Waste when the food was made and thrown away.');
+      }
+      final stockDeducted = readBool(data, ['stock_deducted']);
+      await ref.set({
+        'status': 'CANCELLED',
+        'cancelled_at': FieldValue.serverTimestamp(),
+        'cancelled_by': _tenant.userId,
+        'stock_restored': false,
+        'cancel_note': stockDeducted ? 'Stock was already deducted.' : 'Stock was not deducted because the sale was not completed.',
+      }, SetOptions(merge: true));
+    } catch (error) {
+      if (error is Failure) rethrow;
+      throw mapFirebaseFailure(error);
+    }
+  }
+
+  /// Voids a completed sale and puts recipe stock back when it was deducted.
+  /// Does not record a cash refund. Use refund when money goes back to the customer.
+  Future<void> cancelCompletedSale(String id) async {
+    try {
+      if (!(_tenant.permissions.contains(PosPermissions.orderCancel) ||
+          _tenant.permissions.contains(PosPermissions.ordersRefund))) {
+        throw const Failure('You cannot cancel completed sales.');
+      }
+      final businessId = _tenant.requireBusinessId();
+      final db = _firestore.requireDb();
+      final businessRef = db.collection('businesses').doc(businessId);
+      final ref = businessRef.collection('orders').doc(id);
+      final snap = await ref.get();
+      if (!snap.exists) throw const Failure('Order was not found.');
+      final data = asStringKeyMap(snap.data());
+      if (!_tenant.matchesBranch(readString(data, ['branch_id', 'branchId']))) {
+        throw const Failure('That order is not in your branch.');
+      }
+      final status = readString(data, ['status'], 'COMPLETED').toUpperCase();
+      if (status != 'COMPLETED') {
+        throw const Failure('Only a completed sale that has not been refunded can be voided this way.');
+      }
+      if (money(readString(data, ['refund_total'], '0')) > Decimal.zero) {
+        throw const Failure('This sale already has a refund. Finish it with refund instead of voiding it.');
+      }
+      final branchId = readString(data, ['branch_id', 'branchId']);
+      final stockDeducted = readBool(data, ['stock_deducted']);
+      final alreadyReversed = readBool(data, ['stock_reversed']);
+      if (stockDeducted && !alreadyReversed) {
+        final recipesByProduct = _indexRecipes((await businessRef.collection('recipes').get()).docs);
+        final productsById = _indexProducts((await businessRef.collection('products').get()).docs);
+        final needs = _collectStockNeeds(
+          items: readList(data, ['items']).map(asStringKeyMap).toList(),
+          branchId: branchId,
+          recipesByProduct: recipesByProduct,
+          productsById: productsById,
+        );
+        final inventory = businessRef.collection('inventory');
+        final transactions = businessRef.collection('inventory_transactions');
+        final batch = db.batch();
+        for (final need in needs.values) {
+          final stockSnap = await inventory.doc(need.inventoryId).get();
+          if (!stockSnap.exists) continue;
+          final stock = asStringKeyMap(stockSnap.data());
+          final current = money(readString(stock, ['quantity_base', 'quantityBase'], '0'));
+          final next = current + need.quantity;
+          batch.update(inventory.doc(need.inventoryId), {'quantity_base': moneyString(next)});
+          batch.set(transactions.doc(const Uuid().v4()), {
+            'branch_id': branchId,
+            'inventory_id': need.inventoryId,
+            'ingredient_id': need.ingredientId,
+            'type': 'SALE_REVERSAL',
+            'quantity_base': moneyString(need.quantity),
+            'order_id': id,
+            'reason': 'Completed sale cancelled',
+            'created_by': _tenant.userId,
+            'created_at': Timestamp.fromDate(DateTime.now().toUtc()),
+          });
+        }
+        batch.set(ref, {
+          'status': 'CANCELLED',
+          'stock_reversed': true,
+          'cancelled_at': Timestamp.fromDate(DateTime.now().toUtc()),
+          'cancelled_by': _tenant.userId,
+          'cancel_note': 'Completed sale voided and stock restored.',
+        }, SetOptions(merge: true));
+        await batch.commit();
+        return;
+      }
+      await ref.set({
+        'status': 'CANCELLED',
+        'stock_reversed': alreadyReversed,
+        'cancelled_at': FieldValue.serverTimestamp(),
+        'cancelled_by': _tenant.userId,
+        'cancel_note': 'Completed sale voided. Stock was not deducted, so nothing was restored.',
+      }, SetOptions(merge: true));
     } catch (error) {
       if (error is Failure) rethrow;
       throw mapFirebaseFailure(error);
@@ -820,18 +910,45 @@ class OrderRepository {
       final qty = money(readString(item, ['quantity'], '1'));
       final product = _productForLine(item, productsById);
       final recipe = _recipeForProduct(productId, recipesByProduct);
+      final selectedOptions = readList(item, ['optionIds', 'option_ids']).map((value) => value.toString()).toSet();
+      final variantId = readString(item, ['variantId', 'variant_id']);
+      var multiplier = Decimal.one;
+      if (product != null && variantId.isNotEmpty) {
+        for (final raw in readList(product, ['variants'])) {
+          final variant = asStringKeyMap(raw);
+          if (readString(variant, ['id']) == variantId) {
+            final factor = readString(variant, ['recipe_multiplier', 'recipeMultiplier'], '1');
+            multiplier = money(factor.isEmpty ? '1' : factor);
+            break;
+          }
+        }
+      }
+      if (multiplier <= Decimal.zero) multiplier = Decimal.one;
 
       if (recipe != null) {
         for (final raw in readList(recipe, ['items'])) {
           final recipeItem = asStringKeyMap(raw);
           final ingredientId = readString(recipeItem, ['ingredient_id', 'ingredientId']);
           if (ingredientId.isEmpty) continue;
-          final perUnit = money(readString(recipeItem, ['quantity_base', 'quantityBase'], '0'));
+          final optionId = readString(recipeItem, ['option_id', 'optionId']);
+          if (optionId.isNotEmpty && !selectedOptions.contains(optionId)) continue;
+          final unit = readString(recipeItem, ['unit'], 'PCS');
+          final bySize = recipeItem['variant_quantities'];
+          var sizeQty = '';
+          if (bySize is Map && variantId.isNotEmpty) {
+            final match = bySize[variantId] ?? bySize[variantId.toUpperCase()];
+            if (match != null) sizeQty = match.toString();
+          }
+          final perUnit = StockUnits.toBase(
+            sizeQty.isNotEmpty ? sizeQty : readString(recipeItem, ['quantity_base', 'quantityBase'], '0'),
+            unit,
+          );
+          final scale = sizeQty.isNotEmpty ? Decimal.one : multiplier;
           _addStockNeed(
             needs,
             branchId: branchId,
             ingredientId: ingredientId,
-            quantity: perUnit * qty,
+            quantity: perUnit * qty * scale,
             label: ingredientId,
           );
         }

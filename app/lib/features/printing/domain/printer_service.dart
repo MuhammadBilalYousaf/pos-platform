@@ -173,12 +173,14 @@ class ReceiptData {
 
 class PrinterNotConfiguredException implements Exception {
   @override
-  String toString() => 'No thermal printer selected. Choose one in Receipt Settings.';
+  String toString() =>
+      'No thermal printer found. Plug in the USB printer, install its Windows driver, then tap Scan printers.';
 }
 
 abstract class PrinterService {
   Future<void> printReceipt(ReceiptData receipt);
   Future<List<String>> availablePrinters();
+  String? scanWarning();
   String? get configuredPrinter;
   Future<void> configurePrinter(String? name);
 }
@@ -278,15 +280,45 @@ class ThermalPrinterService implements PrinterService {
   String? get configuredPrinter => _settings.selectedPrinter;
 
   @override
-  Future<List<String>> availablePrinters() async => _transport.listPrinters();
+  Future<List<String>> availablePrinters() async {
+    final printers = _transport.listPrinters();
+    final saved = _settings.selectedPrinter;
+    if (saved != null && printers.any((name) => name.toLowerCase() == saved.toLowerCase())) {
+      return printers;
+    }
+    final preferred = printers.where((name) => !_isVirtualPrinter(name)).toList();
+    if (saved == null && preferred.length == 1) {
+      await _settings.save(preferred.first);
+    }
+    return printers;
+  }
+
+  @override
+  String? scanWarning() => _transport.pluggedInWithoutDriver();
 
   @override
   Future<void> configurePrinter(String? name) => _settings.save(name);
 
   @override
   Future<void> printReceipt(ReceiptData receipt) async {
-    final printer = _settings.selectedPrinter ?? _transport.defaultPrinter();
+    final known = _transport.listPrinters();
+    var printer = _settings.selectedPrinter;
+    final stillThere = printer != null && known.any((name) => name.toLowerCase() == printer!.toLowerCase());
+    if (!stillThere) {
+      final preferred = known.where((name) => !_isVirtualPrinter(name)).toList();
+      printer = preferred.length == 1 ? preferred.first : null;
+      if (printer != null) await _settings.save(printer);
+    }
     if (printer == null || printer.isEmpty) throw PrinterNotConfiguredException();
     _transport.send(printer, _encoder.encode(receipt));
   }
+}
+
+bool _isVirtualPrinter(String name) {
+  final value = name.toLowerCase();
+  return value.contains('pdf') ||
+      value.contains('xps') ||
+      value.contains('onenote') ||
+      value.contains('one note') ||
+      value.contains('fax');
 }
