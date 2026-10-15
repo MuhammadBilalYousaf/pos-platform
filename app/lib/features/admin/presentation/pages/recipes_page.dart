@@ -1,6 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../config/dependency_injection/injection.dart';
+import '../../../../core/errors/failures.dart';
+import '../../../../core/utils/order_totals.dart';
+import '../../../../core/utils/recipe_cost.dart';
+import '../../../../core/utils/stock_status.dart';
+import '../../../../core/utils/stock_units.dart';
+import '../../../../core/widgets/stock_item_picker.dart';
 import '../../../products/domain/entities/catalog.dart';
 import '../../../products/presentation/bloc/catalog_cubit.dart';
 import '../../data/admin_repository.dart';
@@ -55,6 +61,23 @@ class _RecipesTabState extends State<RecipesTab> {
     return id;
   }
 
+  String _recipeCostLabel(ProductRecipe recipe) {
+    final costs = {
+      for (final item in _ingredients)
+        item.id: IngredientCostSnapshot(
+          ingredientId: item.id,
+          name: item.name,
+          unitCostPerBase: money(item.unitCostPerBase.isEmpty ? '0' : item.unitCostPerBase),
+          unit: item.unit,
+        ),
+    };
+    final breakdown = RecipeCostCalculator.forVariant(
+      recipe: recipe,
+      costsByIngredient: costs,
+    );
+    return 'Recipe cost: Rs. ${moneyString(breakdown.totalCost)}';
+  }
+
   Future<void> _produce() async {
     final mixtures = _ingredients.where((item) => item.kind == 'MIXTURE').toList();
     final parts = _ingredients.where((item) => item.kind != 'MIXTURE').toList();
@@ -64,61 +87,19 @@ class _RecipesTabState extends State<RecipesTab> {
       );
       return;
     }
-    var mixtureId = mixtures.first.id;
-    final yieldQty = TextEditingController(text: '1');
-    final componentQty = TextEditingController(text: '1');
-    var componentId = parts.first.id;
-    final ok = await showDialog<bool>(
+    await showDialog<void>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setLocal) => AlertDialog(
-          title: const Text('Prepare mixture'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('Raw ingredients are deducted. The mixture stock increases. Selling a product that uses the mixture does not deduct the raw ingredients again.'),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: mixtureId,
-                decoration: const InputDecoration(labelText: 'Mixture'),
-                items: [for (final item in mixtures) DropdownMenuItem(value: item.id, child: Text(item.name))],
-                onChanged: (value) {
-                  if (value != null) setLocal(() => mixtureId = value);
-                },
-              ),
-              TextField(controller: yieldQty, decoration: const InputDecoration(labelText: 'Yield quantity')),
-              DropdownButtonFormField<String>(
-                initialValue: componentId,
-                decoration: const InputDecoration(labelText: 'Ingredient used'),
-                items: [for (final item in parts) DropdownMenuItem(value: item.id, child: Text('${item.name} (${item.unit})'))],
-                onChanged: (value) {
-                  if (value != null) setLocal(() => componentId = value);
-                },
-              ),
-              TextField(controller: componentQty, decoration: const InputDecoration(labelText: 'Ingredient quantity')),
-            ],
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Produce')),
-          ],
-        ),
+      builder: (context) => _ProduceMixtureDialog(
+        mixtures: mixtures,
+        parts: parts,
+        onProduced: () async {
+          await _load();
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Mixture stock updated.')));
+          }
+        },
       ),
     );
-    if (ok != true) return;
-    final mixture = mixtures.firstWhere((item) => item.id == mixtureId);
-    final component = parts.firstWhere((item) => item.id == componentId);
-    await sl<AdminRepository>().produceMixture(
-      mixtureId: mixture.id,
-      yieldQuantity: yieldQty.text.trim(),
-      yieldUnit: mixture.unit,
-      components: [
-        RecipeLine(ingredientId: component.id, quantity: componentQty.text.trim(), unit: component.unit),
-      ],
-    );
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Mixture stock updated.')));
-    }
   }
 
   Future<void> _edit({ProductRecipe? recipe}) async {
@@ -189,8 +170,12 @@ class _RecipesTabState extends State<RecipesTab> {
                         child: ListTile(
                           title: Text(recipe.name),
                           subtitle: Text(
-                            recipe.items.map((item) => '${_ingredientName(item.ingredientId)} × ${item.quantity}').join(' · '),
+                            [
+                              recipe.items.map((item) => '${_ingredientName(item.ingredientId)} × ${item.quantity}').join(' · '),
+                              _recipeCostLabel(recipe),
+                            ].where((part) => part.isNotEmpty).join('\n'),
                           ),
+                          isThreeLine: true,
                           trailing: IconButton(
                             icon: const Icon(Icons.delete_outline),
                             onPressed: () async {
@@ -203,6 +188,219 @@ class _RecipesTabState extends State<RecipesTab> {
                       ),
                   ],
                 ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ComponentDraft {
+  _ComponentDraft({required this.ingredientId, required String quantity, required this.unit})
+      : qty = TextEditingController(text: quantity);
+
+  String ingredientId;
+  String unit;
+  final TextEditingController qty;
+
+  void dispose() => qty.dispose();
+}
+
+class _ProduceMixtureDialog extends StatefulWidget {
+  const _ProduceMixtureDialog({
+    required this.mixtures,
+    required this.parts,
+    required this.onProduced,
+  });
+
+  final List<IngredientOption> mixtures;
+  final List<IngredientOption> parts;
+  final Future<void> Function() onProduced;
+
+  @override
+  State<_ProduceMixtureDialog> createState() => _ProduceMixtureDialogState();
+}
+
+class _ProduceMixtureDialogState extends State<_ProduceMixtureDialog> {
+  late String _mixtureId;
+  late final TextEditingController _yieldQty;
+  late List<_ComponentDraft> _components;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _mixtureId = widget.mixtures.first.id;
+    _yieldQty = TextEditingController(text: '1');
+    final first = widget.parts.first;
+    _components = [_ComponentDraft(ingredientId: first.id, quantity: '1', unit: first.unit)];
+  }
+
+  @override
+  void dispose() {
+    _yieldQty.dispose();
+    for (final row in _components) {
+      row.dispose();
+    }
+    super.dispose();
+  }
+
+  IngredientOption _mixture() => widget.mixtures.firstWhere((item) => item.id == _mixtureId);
+
+  Set<String> get _used => _components.map((row) => row.ingredientId).toSet();
+
+  @override
+  Widget build(BuildContext context) {
+    final mixture = _mixture();
+    return AlertDialog(
+      title: const Text('Prepare mixture'),
+      content: SizedBox(
+        width: 520,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Add every ingredient used. Each is deducted from stock, then the yield is added to the mixture. Selling a product that uses the mixture does not deduct the raw ingredients again.',
+              ),
+              const SizedBox(height: 12),
+              StockItemPicker(
+                items: widget.mixtures,
+                value: _mixtureId,
+                label: 'Mixture',
+                onChanged: (item) {
+                  if (item != null) setState(() => _mixtureId = item.id);
+                },
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _yieldQty,
+                decoration: InputDecoration(labelText: 'Yield quantity', suffixText: mixture.unit),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(child: Text('Ingredients', style: Theme.of(context).textTheme.titleSmall)),
+                  TextButton(
+                    onPressed: () {
+                      final next = widget.parts.where((item) => !_used.contains(item.id)).toList();
+                      if (next.isEmpty) {
+                        setState(() => _error = 'All available ingredients are already listed.');
+                        return;
+                      }
+                      setState(() {
+                        _error = null;
+                        _components.add(_ComponentDraft(ingredientId: next.first.id, quantity: '1', unit: next.first.unit));
+                      });
+                    },
+                    child: const Text('Add ingredient'),
+                  ),
+                ],
+              ),
+              for (var index = 0; index < _components.length; index++)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Column(
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: StockItemPicker(
+                              items: widget.parts,
+                              value: _components[index].ingredientId,
+                              excludeIds: _used,
+                              label: 'Ingredient ${index + 1}',
+                              onChanged: (item) {
+                                if (item == null) return;
+                                setState(() {
+                                  _components[index].ingredientId = item.id;
+                                  _components[index].unit = item.unit;
+                                });
+                              },
+                            ),
+                          ),
+                          if (_components.length > 1)
+                            IconButton(
+                              onPressed: () => setState(() {
+                                _components.removeAt(index).dispose();
+                              }),
+                              icon: const Icon(Icons.close),
+                            ),
+                        ],
+                      ),
+                      TextField(
+                        controller: _components[index].qty,
+                        decoration: InputDecoration(
+                          labelText: 'Quantity',
+                          suffixText: _components[index].unit,
+                          helperText: () {
+                            IngredientOption? match;
+                            for (final item in widget.parts) {
+                              if (item.id == _components[index].ingredientId) {
+                                match = item;
+                                break;
+                              }
+                            }
+                            if (match == null) return null;
+                            final onHand = StockUnits.fromBase(money(match.onHandBase), match.unit);
+                            final status = StockStatus.fromQuantity(quantity: onHand, reorderLevel: match.reorderLevel);
+                            return 'On hand: $onHand ${match.unit}${status.isWarning ? ' · ${status.label}' : ''}';
+                          }(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: _busy ? null : () => Navigator.pop(context), child: const Text('Cancel')),
+        FilledButton(
+          onPressed: _busy
+              ? null
+              : () async {
+                  setState(() {
+                    _busy = true;
+                    _error = null;
+                  });
+                  try {
+                    await sl<AdminRepository>().produceMixture(
+                      mixtureId: mixture.id,
+                      yieldQuantity: _yieldQty.text.trim(),
+                      yieldUnit: mixture.unit,
+                      components: [
+                        for (final row in _components)
+                          RecipeLine(
+                            ingredientId: row.ingredientId,
+                            quantity: row.qty.text.trim(),
+                            unit: row.unit,
+                          ),
+                      ],
+                    );
+                    await widget.onProduced();
+                    if (context.mounted) Navigator.pop(context);
+                  } on Failure catch (error) {
+                    setState(() {
+                      _busy = false;
+                      _error = error.message;
+                    });
+                  } catch (error) {
+                    setState(() {
+                      _busy = false;
+                      _error = error.toString();
+                    });
+                  }
+                },
+          child: Text(_busy ? 'Producing…' : 'Produce Mixture'),
         ),
       ],
     );
@@ -379,16 +577,13 @@ class _RecipeEditorDialogState extends State<_RecipeEditorDialog> {
                     children: [
                       Expanded(
                         flex: 3,
-                        child: DropdownButtonFormField<String>(
+                        child: StockItemPicker(
                           key: ValueKey('ing-$index-${_lines[index].ingredientId}'),
-                          initialValue: _lines[index].ingredientId,
-                          decoration: const InputDecoration(labelText: 'Ingredient'),
-                          items: [
-                            for (final item in widget.ingredients)
-                              if (item.id == _lines[index].ingredientId || !used.contains(item.id))
-                                DropdownMenuItem(value: item.id, child: Text(item.name)),
-                          ],
-                          onChanged: (value) => setState(() => _lines[index].ingredientId = value),
+                          items: widget.ingredients,
+                          value: _lines[index].ingredientId,
+                          excludeIds: used,
+                          label: 'Ingredient / stock',
+                          onChanged: (item) => setState(() => _lines[index].ingredientId = item?.id),
                         ),
                       ),
                       if (_lines.length > 1)
@@ -423,6 +618,70 @@ class _RecipeEditorDialogState extends State<_RecipeEditorDialog> {
                     ],
                   ),
                 ),
+              Builder(
+                builder: (context) {
+                  final product = _selectedProduct(_productId);
+                  final draftLines = [
+                    for (final line in _lines)
+                      if (line.ingredientId != null)
+                        RecipeLine(
+                          ingredientId: line.ingredientId!,
+                          quantity: line.amountFor.values.map((item) => item.text.trim()).firstWhere((item) => item.isNotEmpty, orElse: () => '1'),
+                          optionId: line.optionId,
+                          unit: _unitFor(line.ingredientId),
+                          variantQuantities: {
+                            for (final variant in product.variants)
+                              if ((line.amountFor[variant.id]?.text.trim() ?? '').isNotEmpty)
+                                variant.id: line.amountFor[variant.id]!.text.trim(),
+                          },
+                        ),
+                  ];
+                  final costs = {
+                    for (final item in widget.ingredients)
+                      item.id: IngredientCostSnapshot(
+                        ingredientId: item.id,
+                        name: item.name,
+                        unitCostPerBase: money(item.unitCostPerBase.isEmpty ? '0' : item.unitCostPerBase),
+                        unit: item.unit,
+                      ),
+                  };
+                  final recipe = ProductRecipe(
+                    id: product.id,
+                    productId: product.id,
+                    name: product.name,
+                    items: draftLines,
+                  );
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const SizedBox(height: 8),
+                      Text('Recipe cost by size', style: Theme.of(context).textTheme.titleSmall),
+                      for (final variant in product.variants)
+                        Builder(
+                          builder: (context) {
+                            final breakdown = RecipeCostCalculator.forVariant(
+                              recipe: recipe,
+                              costsByIngredient: costs,
+                              variantId: variant.id,
+                              variantName: variant.name,
+                              sellPrice: variant.price,
+                            );
+                            final margin = breakdown.margin;
+                            return Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                '${variant.name}: cost Rs. ${moneyString(breakdown.totalCost)}'
+                                ' · sell Rs. ${variant.price}'
+                                '${margin == null ? '' : ' · margin Rs. ${moneyString(margin)}'}',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            );
+                          },
+                        ),
+                    ],
+                  );
+                },
+              ),
               if (_error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 8),

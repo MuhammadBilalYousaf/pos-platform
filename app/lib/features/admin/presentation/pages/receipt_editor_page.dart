@@ -79,9 +79,20 @@ class _ReceiptEditorPageState extends State<ReceiptEditorPage> {
   }
 
   Future<void> _selectPrinter(String? name) async {
-    await sl<PrinterService>().configurePrinter(name);
-    if (!mounted) return;
-    setState(() => _printer = name);
+    try {
+      await sl<PrinterService>().configurePrinter(name);
+      if (!mounted) return;
+      setState(() {
+        _printer = name;
+        _printerNote = name == null
+            ? 'No printer selected.'
+            : 'Selected ${_printerLabel(name)}. Use Print test receipt to verify.';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+      setState(() => _printer = sl<PrinterService>().configuredPrinter);
+    }
   }
 
   Future<void> _testPrint() async {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
@@ -62,12 +64,23 @@ class OrderSubmitting extends OrderState {
 }
 
 class OrderCompleted extends OrderState {
-  const OrderCompleted({required this.message, required this.receipt, this.printed = true});
+  const OrderCompleted({
+    required this.message,
+    required this.receipt,
+    this.stockWarnings = const [],
+  });
   final String message;
   final ReceiptData receipt;
-  final bool printed;
+  final List<String> stockWarnings;
   @override
-  List<Object?> get props => [message, printed, receipt.orderNumber];
+  List<Object?> get props => [message, receipt.orderNumber, stockWarnings];
+}
+
+class OrderPrintIssue extends OrderState {
+  const OrderPrintIssue(this.message);
+  final String message;
+  @override
+  List<Object?> get props => [message];
 }
 
 class OrderFailure extends OrderState {
@@ -129,16 +142,15 @@ class OrderCubit extends Cubit<OrderState> {
       orderNumber: order?['order_number'] as String? ?? order?['orderNumber'] as String? ?? 'OFFLINE',
       cashierName: command.cashierName ?? '',
       createdAt: DateTime.now(),
-      lines: command.cart.lines
-          .map(
-            (line) => ReceiptLine(
-              name: line.displayName,
-              quantity: line.quantity.toString(),
-              unitPrice: line.variant.price,
-              lineTotal: command.cart.totals.lineTotals[command.cart.lines.indexOf(line)],
-            ),
-          )
-          .toList(),
+      lines: [
+        for (var i = 0; i < command.cart.lines.length; i++)
+          ReceiptLine(
+            name: command.cart.lines[i].displayName,
+            quantity: command.cart.lines[i].quantity.toString(),
+            unitPrice: command.cart.lines[i].variant.price,
+            lineTotal: command.cart.totals.lineTotals[i],
+          ),
+      ],
       subtotal: command.cart.totals.subtotal,
       discount: command.cart.totals.discountAmount,
       tax: command.cart.totals.taxAmount,
@@ -156,37 +168,30 @@ class OrderCubit extends Cubit<OrderState> {
       change: command.change,
     );
 
-    var printed = true;
-    Object? printError;
-    try {
-      await _printer.printReceipt(receipt);
-    } catch (error) {
-      printed = false;
-      printError = error;
-    }
+    final stockWarnings = (order?['stock_warnings'] as List?)?.map((e) => e.toString()).toList() ?? const <String>[];
 
-    if (offline) {
-      emit(
-        OrderCompleted(
-          receipt: receipt,
-          message: printed
-              ? 'Internet unavailable. Order saved offline.'
-              : 'Internet unavailable. Order saved offline. Receipt preview is on screen.',
-          printed: printed,
-        ),
-      );
-      return;
-    }
-
+    // Punch completes immediately; printing must not delay the sale UX.
     emit(
       OrderCompleted(
         receipt: receipt,
-        message: printed
-            ? 'Order completed.'
-            : 'Order saved. Receipt was not printed. ${printError ?? 'Choose a printer in Receipt Settings.'}',
-        printed: printed,
+        stockWarnings: stockWarnings,
+        message: offline
+            ? 'Internet unavailable. Order saved offline.'
+            : stockWarnings.isEmpty
+                ? 'Order completed.'
+                : 'Order completed with stock warnings.',
       ),
     );
+
+    unawaited(() async {
+      try {
+        await _printer.printReceipt(receipt);
+      } catch (error) {
+        if (!isClosed) {
+          emit(OrderPrintIssue('Order saved. Receipt was not printed. $error'));
+        }
+      }
+    }());
   }
 
   void acknowledge() => emit(const OrderIdle());
@@ -194,6 +199,11 @@ class OrderCubit extends Cubit<OrderState> {
   Future<void> reprint(ReceiptData receipt) async {
     try {
       await _printer.printReceipt(receipt);
-    } catch (_) {}
+    } catch (error) {
+      if (!isClosed) {
+        emit(OrderPrintIssue('Reprint failed. $error'));
+      }
+      rethrow;
+    }
   }
 }

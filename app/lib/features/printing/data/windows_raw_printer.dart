@@ -76,7 +76,7 @@ class WindowsRawPrinter {
         [
           '-NoProfile',
           '-Command',
-          r"Get-PnpDevice -PresentOnly -Class Printer,USB | Where-Object { $_.FriendlyName -match 'print|POS|thermal|receipt|Xprinter|Epson|Gprinter|Rongta' } | ForEach-Object { $_.Status + '|' + $_.FriendlyName }",
+          r"Get-PnpDevice -PresentOnly -Class Printer,USB | Where-Object { $_.Status -ne 'OK' -or $_.FriendlyName -match 'print|POS|thermal|receipt|Xprinter|Epson|Gprinter|Rongta|Unknown USB' } | ForEach-Object { $_.Status + '|' + $_.FriendlyName }",
         ],
       );
       if (result.exitCode != 0) return null;
@@ -92,7 +92,8 @@ class WindowsRawPrinter {
         }
       }
       if (problems.isEmpty) return null;
-      return 'Windows sees ${problems.join(', ')} but it has no working printer driver. Install that driver in Windows Settings, then scan again.';
+      return 'Windows sees ${problems.join(', ')} but it is not ready (driver missing or USB error). '
+          'Unplug/replug the printer, install its Windows driver (or Generic / Text Only), then Scan printers again.';
     } catch (_) {
       return null;
     }
@@ -116,9 +117,18 @@ class WindowsRawPrinter {
     }
   }
 
+  /// Device path for a Windows COM port (e.g. COM3 → \\.\COM3).
+  static String comDevicePath(String printerName) {
+    final port = printerName.trim().toUpperCase();
+    return '\\\\.\\$port';
+  }
+
   void send(String printerName, List<int> bytes) {
+    if (bytes.isEmpty) {
+      throw StateError('Receipt is empty — nothing to print.');
+    }
     if (RegExp(r'^COM\d+$', caseSensitive: false).hasMatch(printerName.trim())) {
-      _sendToPort(r'\\.\${printerName.trim().toUpperCase()}', bytes);
+      _sendToPort(comDevicePath(printerName), bytes);
       return;
     }
     final namePtr = printerName.toNativeUtf16();

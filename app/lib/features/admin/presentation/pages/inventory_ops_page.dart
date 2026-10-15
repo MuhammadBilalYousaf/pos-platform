@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
 import '../../../../config/dependency_injection/injection.dart';
-import '../../../../core/firebase/tenant_context.dart';
 import '../../../../core/widgets/admin_ui_kit.dart';
+import '../../../../core/widgets/stock_item_picker.dart';
 import '../../data/admin_repository.dart';
 import '../bloc/branch_context_cubit.dart';
 
@@ -218,36 +218,45 @@ class _PurchasesTabState extends State<PurchasesTab> with SingleTickerProviderSt
     var ingredientId = ingredients.first.id;
     var unit = ingredients.first.unit;
     final qty = TextEditingController();
+    final cost = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setLocal) => AlertDialog(
           title: const Text('Purchase'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Receiving this purchase adds the quantity to current stock. You do not edit the stock by hand.'),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: ingredientId,
-                decoration: const InputDecoration(labelText: 'Stock item'),
-                items: [
-                  for (final item in ingredients)
-                    DropdownMenuItem(value: item.id, child: Text('${item.name} (${item.unit})')),
-                ],
-                onChanged: (value) {
-                  if (value == null) return;
-                  final match = ingredients.firstWhere((item) => item.id == value);
-                  setLocal(() {
-                    ingredientId = value;
-                    unit = match.unit;
-                  });
-                },
-              ),
-              const SizedBox(height: 12),
-              TextField(controller: qty, decoration: InputDecoration(labelText: 'Quantity received ($unit)')),
-            ],
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Receiving this purchase adds the quantity to current stock. Optional cost updates the average unit cost used for recipe costing.'),
+                const SizedBox(height: 12),
+                StockItemPicker(
+                  items: ingredients,
+                  value: ingredientId,
+                  label: 'Stock item',
+                  onChanged: (item) {
+                    if (item == null) return;
+                    setLocal(() {
+                      ingredientId = item.id;
+                      unit = item.unit;
+                    });
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextField(controller: qty, decoration: InputDecoration(labelText: 'Quantity received ($unit)')),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: cost,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(
+                    labelText: 'Total purchase cost (Rs)',
+                    helperText: 'Total paid for the quantity above. Updates average unit cost used in recipes/mixtures.',
+                  ),
+                ),
+              ],
+            ),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
@@ -258,7 +267,11 @@ class _PurchasesTabState extends State<PurchasesTab> with SingleTickerProviderSt
     );
     if (ok != true) return;
     try {
-      await sl<AdminRepository>().receivePurchase(ingredientId: ingredientId, quantity: qty.text.trim());
+      await sl<AdminRepository>().receivePurchase(
+        ingredientId: ingredientId,
+        quantity: qty.text.trim(),
+        unitCost: cost.text.trim().isEmpty ? null : cost.text.trim(),
+      );
       await _load();
     } catch (error) {
       if (!mounted) return;
@@ -403,7 +416,13 @@ class _TransfersTabState extends State<TransfersTab> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Need at least two branches to transfer.')));
       return;
     }
-    final sku = TextEditingController();
+    final ingredients = await sl<AdminRepository>().listIngredients();
+    if (!mounted) return;
+    if (ingredients.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Add stock items first.')));
+      return;
+    }
+    var ingredientId = ingredients.first.id;
     final qty = TextEditingController();
     var from = branches.first.id;
     var to = branches[1].id;
@@ -414,31 +433,41 @@ class _TransfersTabState extends State<TransfersTab> {
           builder: (context, setLocal) {
             return AlertDialog(
               title: const Text('Stock transfer'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  DropdownButtonFormField<String>(
-                    initialValue: from,
-                    decoration: const InputDecoration(labelText: 'From'),
-                    items: [for (final branch in branches) DropdownMenuItem(value: branch.id, child: Text(branch.name))],
-                    onChanged: (value) {
-                      if (value != null) setLocal(() => from = value);
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  DropdownButtonFormField<String>(
-                    initialValue: to,
-                    decoration: const InputDecoration(labelText: 'To'),
-                    items: [for (final branch in branches) DropdownMenuItem(value: branch.id, child: Text(branch.name))],
-                    onChanged: (value) {
-                      if (value != null) setLocal(() => to = value);
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(controller: sku, decoration: const InputDecoration(labelText: 'Ingredient SKU')),
-                  const SizedBox(height: 12),
-                  TextField(controller: qty, decoration: const InputDecoration(labelText: 'Quantity')),
-                ],
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    DropdownButtonFormField<String>(
+                      initialValue: from,
+                      decoration: const InputDecoration(labelText: 'From'),
+                      items: [for (final branch in branches) DropdownMenuItem(value: branch.id, child: Text(branch.name))],
+                      onChanged: (value) {
+                        if (value != null) setLocal(() => from = value);
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: to,
+                      decoration: const InputDecoration(labelText: 'To'),
+                      items: [for (final branch in branches) DropdownMenuItem(value: branch.id, child: Text(branch.name))],
+                      onChanged: (value) {
+                        if (value != null) setLocal(() => to = value);
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    StockItemPicker(
+                      items: ingredients,
+                      value: ingredientId,
+                      label: 'Stock item',
+                      onChanged: (item) {
+                        if (item != null) setLocal(() => ingredientId = item.id);
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(controller: qty, decoration: const InputDecoration(labelText: 'Quantity')),
+                  ],
+                ),
               ),
               actions: [
                 TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
@@ -451,7 +480,7 @@ class _TransfersTabState extends State<TransfersTab> {
     );
     if (ok != true) return;
     await sl<AdminRepository>().transferStock(
-      ingredientId: sku.text.trim().toUpperCase(),
+      ingredientId: ingredientId,
       fromBranchId: from,
       toBranchId: to,
       quantity: qty.text.trim(),
@@ -532,31 +561,31 @@ class _WasteTabState extends State<WasteTab> {
       builder: (context) => StatefulBuilder(
         builder: (context, setLocal) => AlertDialog(
           title: const Text('Waste stock'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              DropdownButtonFormField<String>(
-                initialValue: ingredientId,
-                decoration: const InputDecoration(labelText: 'Item'),
-                items: [
-                  for (final item in ingredients) DropdownMenuItem(value: item.id, child: Text(item.name)),
-                ],
-                onChanged: (value) {
-                  if (value == null) return;
-                  final match = ingredients.firstWhere((item) => item.id == value);
-                  setLocal(() {
-                    ingredientId = value;
-                    unit = match.unit;
-                  });
-                },
-              ),
-              const SizedBox(height: 12),
-              TextField(controller: qty, decoration: InputDecoration(labelText: 'Quantity ($unit)')),
-              const SizedBox(height: 12),
-              TextField(controller: reason, decoration: const InputDecoration(labelText: 'Reason')),
-              const SizedBox(height: 12),
-              TextField(controller: notes, decoration: const InputDecoration(labelText: 'Notes (optional)')),
-            ],
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                StockItemPicker(
+                  items: ingredients,
+                  value: ingredientId,
+                  label: 'Item',
+                  onChanged: (item) {
+                    if (item == null) return;
+                    setLocal(() {
+                      ingredientId = item.id;
+                      unit = item.unit;
+                    });
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextField(controller: qty, decoration: InputDecoration(labelText: 'Quantity ($unit)')),
+                const SizedBox(height: 12),
+                TextField(controller: reason, decoration: const InputDecoration(labelText: 'Reason')),
+                const SizedBox(height: 12),
+                TextField(controller: notes, decoration: const InputDecoration(labelText: 'Notes (optional)')),
+              ],
+            ),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),

@@ -27,6 +27,7 @@ import '../../features/dashboard/data/dashboard_repository.dart';
 import '../../core/network/query_repository.dart';
 import '../../features/admin/data/admin_repository.dart';
 import '../../features/admin/presentation/bloc/branch_context_cubit.dart';
+import '../../features/shifts/data/shift_repository.dart';
 
 final sl = GetIt.instance;
 
@@ -84,13 +85,22 @@ Future<void> configureDependencies() async {
   sl.registerLazySingleton(() => HeldTicketRepository(sl(), sl()));
   sl.registerFactory(() => CartCubit(Hive.box(HiveBoxes.heldTickets), sl()));
 
-  sl.registerLazySingleton(() => OrderRepository(sl(), sl(), Hive.box(HiveBoxes.pendingOrders)));
+  sl.registerLazySingleton(() => AdminRepository(sl(), sl(), sl()));
+  sl.registerLazySingleton(() => ShiftRepository(sl(), sl(), Hive.box(HiveBoxes.session)));
+  sl.registerLazySingleton(
+    () => OrderRepository(
+      sl(),
+      sl(),
+      Hive.box(HiveBoxes.pendingOrders),
+      sl<ShiftRepository>(),
+      sl<AdminRepository>(),
+    ),
+  );
   sl.registerLazySingleton(() => PrinterSettingsStore(Hive.box(HiveBoxes.session)));
   sl.registerLazySingleton<PrinterService>(() => ThermalPrinterService(EscPosEncoder(), sl()));
   sl.registerFactory(() => OrderCubit(sl(), sl()));
   sl.registerFactory(() => SyncCubit(sl()));
   sl.registerLazySingleton(() => DashboardRepository(sl(), sl()));
   sl.registerLazySingleton(() => QueryRepository(sl(), sl()));
-  sl.registerLazySingleton(() => AdminRepository(sl(), sl(), sl()));
   sl.registerLazySingleton(() => BranchContextCubit(sl()));
 }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../../../core/widgets/password_field.dart';
 import '../bloc/auth_bloc.dart';
 
 /// Protected Super Admin registration. Requires the platform owner secret code.
@@ -106,23 +107,19 @@ class _SuperAdminSignupPageState extends State<SuperAdminSignupPage> {
                             textInputAction: TextInputAction.next,
                           ),
                           const SizedBox(height: 16),
-                          TextField(
+                          PasswordField(
                             controller: _password,
-                            obscureText: true,
-                            autofillHints: const [AutofillHints.newPassword],
-                            decoration: const InputDecoration(labelText: 'Password'),
                             enabled: !loading,
+                            autofillHints: const [AutofillHints.newPassword],
                             textInputAction: TextInputAction.next,
                           ),
                           const SizedBox(height: 16),
-                          TextField(
+                          PasswordField(
                             controller: _ownerCode,
-                            obscureText: true,
-                            decoration: const InputDecoration(
-                              labelText: 'Secret owner code',
-                              hintText: 'Required — stored in Firebase, not in this app',
-                            ),
+                            label: 'Secret owner code',
+                            hintText: 'Required — stored in Firebase, not in this app',
                             enabled: !loading,
+                            autofillHints: const [],
                             onSubmitted: (_) => _submit(),
                           ),
                           if (message != null) ...[

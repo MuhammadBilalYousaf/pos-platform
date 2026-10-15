@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../../../config/dependency_injection/injection.dart';
+import '../../../../core/widgets/password_field.dart';
 import '../../../../core/widgets/workbench.dart';
 import '../../data/admin_repository.dart';
 
@@ -117,7 +118,7 @@ class _CreateBusinessPageState extends State<CreateBusinessPage> {
           _section(context, 'Business admin', [
             TextField(controller: _adminName, decoration: const InputDecoration(labelText: 'Admin name')),
             TextField(controller: _adminEmail, decoration: const InputDecoration(labelText: 'Admin email')),
-            TextField(controller: _adminPassword, obscureText: true, decoration: const InputDecoration(labelText: 'Temporary password')),
+            PasswordField(controller: _adminPassword, label: 'Temporary password'),
           ]),
           SwitchListTile(
             value: _seed,

@@ -6,6 +6,7 @@ import 'package:decimal/decimal.dart';
 import '../../../../core/errors/failures.dart';
 import '../../../../core/utils/json_read.dart';
 import '../../../../core/utils/order_totals.dart';
+import '../../../../core/widgets/password_field.dart';
 import '../../../../core/widgets/workbench.dart';
 import '../../../../core/widgets/admin_ui_kit.dart';
 import 'package:intl/intl.dart';
@@ -14,7 +15,20 @@ import '../../../auth/domain/permissions.dart';
 import '../../../orders/data/repositories/order_repository.dart';
 import '../../../pos/presentation/bloc/order_cubit.dart';
 import '../../../printing/domain/printer_service.dart';
+import '../../../admin/data/admin_repository.dart';
 import '../../../admin/presentation/bloc/branch_context_cubit.dart';
+
+class _CancelChoice {
+  const _CancelChoice({
+    required this.returnStock,
+    required this.refundMoney,
+    required this.method,
+  });
+
+  final bool returnStock;
+  final bool refundMoney;
+  final String method;
+}
 
 class OrdersPage extends StatefulWidget {
   const OrdersPage({super.key});
@@ -214,7 +228,39 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
         title: Text(receipt.orderNumber),
         content: SizedBox(
           width: 400,
-          child: SingleChildScrollView(child: SelectableText(receipt.toPreviewText(), style: const TextStyle(fontFamily: 'Consolas'))),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (row['cancel_audit'] is Map) ...[
+                  Text(
+                    'Cancelled by ${readString(asStringKeyMap(row['cancel_audit']), ['by'])}'
+                    ' · stock ${readBool(asStringKeyMap(row['cancel_audit']), ['stock_returned']) ? 'returned' : 'not returned'}'
+                    ' · refund ${readBool(asStringKeyMap(row['cancel_audit']), ['refund_money']) ? readString(asStringKeyMap(row['cancel_audit']), ['refund_amount']) : 'none'}',
+                    style: const TextStyle(fontSize: 12, color: Color(0xFFB91C1C)),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                for (final raw in readList(row, ['items']))
+                  Builder(
+                    builder: (context) {
+                      final item = asStringKeyMap(raw);
+                      final refunded = readString(item, ['refunded_quantity', 'refundedQuantity']);
+                      final returned = readString(item, ['returned_quantity', 'returnedQuantity']);
+                      if (refunded.isEmpty && returned.isEmpty) return const SizedBox.shrink();
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text(
+                          '${readString(item, ['productName', 'product_name'])}: refunded $refunded · returned $returned',
+                          style: const TextStyle(fontSize: 12, color: Color(0xFFB45309)),
+                        ),
+                      );
+                    },
+                  ),
+                SelectableText(receipt.toPreviewText(), style: const TextStyle(fontFamily: 'Consolas')),
+              ],
+            ),
+          ),
         ),
         actions: [
           if (auth is AuthAuthenticated &&
@@ -223,46 +269,33 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
               _canRefund(readString(row, ['status'], 'COMPLETED')) &&
               _refundRemaining(row) > Decimal.zero)
             TextButton(
-              onPressed: () async {
+              onPressed: () {
                 Navigator.pop(context);
-                await _refund(context, row);
+                _runAfterDialogClosed(() => _refund(context, row));
               },
-              child: const Text('Refund'),
+              child: const Text('Refund amount'),
             ),
           if (auth is AuthAuthenticated &&
-              auth.session.user.can(PosPermissions.orderCancel) &&
-              _canCancel(readString(row, ['status'], 'COMPLETED')))
+              (auth.session.user.can(PosPermissions.ordersRefund) ||
+                  auth.session.user.can(PosPermissions.orderRefund)) &&
+              _canRefund(readString(row, ['status'], 'COMPLETED')))
             TextButton(
-              onPressed: () async {
+              onPressed: () {
                 Navigator.pop(context);
-                try {
-                  await sl<OrderRepository>().cancelOrder(readString(row, ['id']));
-                  await _load();
-                } catch (error) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
-                  }
-                }
+                _runAfterDialogClosed(() => _itemRefund(context, row));
               },
-              child: const Text('Cancel order'),
+              child: const Text('Refund / return items'),
             ),
           if (auth is AuthAuthenticated &&
               (auth.session.user.can(PosPermissions.orderCancel) ||
                   auth.session.user.can(PosPermissions.ordersRefund)) &&
-              readString(row, ['status'], 'COMPLETED').toUpperCase() == 'COMPLETED')
+              _canCancelAuthorized(readString(row, ['status'], 'COMPLETED')))
             TextButton(
-              onPressed: () async {
+              onPressed: () {
                 Navigator.pop(context);
-                try {
-                  await sl<OrderRepository>().cancelCompletedSale(readString(row, ['id']));
-                  await _load();
-                } catch (error) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
-                  }
-                }
+                _runAfterDialogClosed(() => _cancelAuthorized(context, row));
               },
-              child: const Text('Cancel completed sale'),
+              child: const Text('Cancel order'),
             ),
           TextButton(
             onPressed: () {
@@ -283,11 +316,22 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
             child: const Text('When to use each'),
           ),
           TextButton(
-            onPressed: () {
-              context.read<OrderCubit>().reprint(receipt);
-              Navigator.pop(context);
+            onPressed: () async {
+              try {
+                await context.read<OrderCubit>().reprint(receipt);
+                if (context.mounted) {
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Reprint sent to the printer.')),
+                  );
+                }
+              } catch (error) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+                }
+              }
             },
-            child: const Text('Reprint preview'),
+            child: const Text('Reprint receipt'),
           ),
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
         ],
@@ -300,9 +344,353 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
     return s == 'COMPLETED' || s == 'PARTIALLY_REFUNDED';
   }
 
-  bool _canCancel(String status) {
+  bool _canCancelAuthorized(String status) {
     final s = status.toUpperCase();
-    return s != 'CANCELLED' && s != 'REFUNDED' && s != 'COMPLETED' && s != 'PARTIALLY_REFUNDED';
+    return s != 'CANCELLED' && s != 'REFUNDED';
+  }
+
+  void _runAfterDialogClosed(Future<void> Function() action) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      await action();
+    });
+  }
+
+  Future<String?> _askCancellationPassword() async {
+    final password = TextEditingController();
+    try {
+      final ok = await showDialog<bool>(
+        context: context,
+        useRootNavigator: true,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Authorization required'),
+          content: PasswordField(
+            controller: password,
+            autofocus: true,
+            label: 'Order cancellation password',
+            helperText: 'Configured by Business Admin in Settings',
+            autofillHints: const [],
+            onSubmitted: (_) => Navigator.pop(dialogContext, true),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Back')),
+            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Continue')),
+          ],
+        ),
+      );
+      if (ok != true) return null;
+      final value = password.text;
+      if (value.trim().isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter the cancellation password.')));
+        }
+        return null;
+      }
+      // Validate immediately so a wrong password fails before the next step.
+      try {
+        await sl<AdminRepository>().verifyOrderCancellationPassword(value);
+      } on Failure catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+        }
+        return null;
+      } catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+        }
+        return null;
+      }
+      return value;
+    } finally {
+      password.dispose();
+    }
+  }
+
+  Future<void> _cancelAuthorized(BuildContext context, Map<String, dynamic> row) async {
+    final password = await _askCancellationPassword();
+    if (password == null || !mounted) return;
+
+    final reason = TextEditingController();
+    try {
+      final choice = await showDialog<_CancelChoice>(
+        context: context,
+        useRootNavigator: true,
+        barrierDismissible: false,
+        builder: (dialogContext) {
+          var returnStock = false;
+          var refundMoney = false;
+          var method = 'CASH';
+          const methods = ['CASH', 'CARD', 'BANK_TRANSFER', 'EASYPAISA', 'JAZZCASH', 'OTHER'];
+          return StatefulBuilder(
+            builder: (context, setLocal) {
+              return AlertDialog(
+                title: Text('Cancel ${readString(row, ['order_number'])}'),
+                content: SizedBox(
+                  width: 440,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text('Choose what should happen with this cancelled order:'),
+                      const SizedBox(height: 8),
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Return stock'),
+                        subtitle: const Text('Restore consumed inventory'),
+                        value: returnStock,
+                        onChanged: (value) => setLocal(() => returnStock = value ?? false),
+                      ),
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Refund money'),
+                        subtitle: const Text('Refund the remaining payment'),
+                        value: refundMoney,
+                        onChanged: (value) => setLocal(() => refundMoney = value ?? false),
+                      ),
+                      Text(
+                        !returnStock && !refundMoney
+                            ? 'Neither — cancel only, no stock or money movement.'
+                            : returnStock && refundMoney
+                                ? 'Both stock return and money refund.'
+                                : returnStock
+                                    ? 'Stock only.'
+                                    : 'Refund only.',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      if (refundMoney) ...[
+                        const SizedBox(height: 8),
+                        DropdownButtonFormField<String>(
+                          initialValue: method,
+                          decoration: const InputDecoration(labelText: 'Refund method'),
+                          items: [for (final m in methods) DropdownMenuItem(value: m, child: Text(m))],
+                          onChanged: (value) {
+                            if (value != null) setLocal(() => method = value);
+                          },
+                        ),
+                      ],
+                      const SizedBox(height: 8),
+                      TextField(controller: reason, decoration: const InputDecoration(labelText: 'Reason (optional)')),
+                    ],
+                  ),
+                ),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Back')),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(
+                      dialogContext,
+                      _CancelChoice(returnStock: returnStock, refundMoney: refundMoney, method: method),
+                    ),
+                    child: const Text('Review confirmation'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+      if (choice == null || !mounted) return;
+
+      final confirmed = await showDialog<bool>(
+        context: context,
+        useRootNavigator: true,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Confirm cancellation'),
+          content: Text(
+            'Order ${readString(row, ['order_number'])}\n'
+            'Return stock: ${choice.returnStock ? 'Yes' : 'No'}\n'
+            'Refund money: ${choice.refundMoney ? 'Yes' : 'No'}\n'
+            '${reason.text.trim().isEmpty ? '' : 'Reason: ${reason.text.trim()}\n'}'
+            '\nThis cannot be undone from this screen.',
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Back')),
+            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Cancel order')),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+
+      try {
+        final result = await sl<OrderRepository>().cancelOrderAuthorized(
+          orderId: readString(row, ['id']),
+          cancellationPassword: password,
+          returnStock: choice.returnStock,
+          refundMoney: choice.refundMoney,
+          reason: reason.text.trim(),
+          refundMethod: choice.method,
+        );
+        await _load();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Cancelled. Stock returned: ${result['stock_returned'] == true ? 'yes' : 'no'}. '
+              'Money refunded: ${result['money_refunded'] == true ? 'Rs. ${result['refund_amount']}' : 'no'}.',
+            ),
+          ),
+        );
+      } on Failure catch (error) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+      } catch (error) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+      }
+    } finally {
+      reason.dispose();
+    }
+  }
+
+  Future<void> _itemRefund(BuildContext context, Map<String, dynamic> row) async {
+    final password = await _askCancellationPassword();
+    if (password == null || !mounted) return;
+
+    final items = readList(row, ['items']).map(asStringKeyMap).toList();
+    final selectedQty = <int, TextEditingController>{};
+    for (var i = 0; i < items.length; i++) {
+      final ordered = money(readString(items[i], ['quantity'], '1'));
+      final refunded = money(readString(items[i], ['refunded_quantity', 'refundedQuantity'], '0'));
+      final remaining = ordered - refunded;
+      if (remaining > Decimal.zero) {
+        selectedQty[i] = TextEditingController(text: '0');
+      }
+    }
+    if (selectedQty.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No items left to refund or return.')));
+      return;
+    }
+
+    var refundMoney = true;
+    var returnStock = false;
+    final reason = TextEditingController();
+    var method = 'CASH';
+    const methods = ['CASH', 'CARD', 'BANK_TRANSFER', 'EASYPAISA', 'JAZZCASH', 'OTHER'];
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setLocal) {
+            return AlertDialog(
+              title: Text('Item refund · ${readString(row, ['order_number'])}'),
+              content: SizedBox(
+                width: 480,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (final entry in selectedQty.entries)
+                        Builder(
+                          builder: (context) {
+                            final item = items[entry.key];
+                            final ordered = money(readString(item, ['quantity'], '1'));
+                            final refunded = money(readString(item, ['refunded_quantity', 'refundedQuantity'], '0'));
+                            final returned = money(readString(item, ['returned_quantity', 'returnedQuantity'], '0'));
+                            final remaining = ordered - refunded;
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    flex: 3,
+                                    child: Text(
+                                      '${readString(item, ['productName', 'product_name'])}\n'
+                                      'Ordered ${moneyString(ordered)} · refunded ${moneyString(refunded)} · returned ${moneyString(returned)}',
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                  ),
+                                  SizedBox(
+                                    width: 90,
+                                    child: TextField(
+                                      controller: entry.value,
+                                      decoration: InputDecoration(
+                                        labelText: 'Qty',
+                                        helperText: 'max ${moneyString(remaining)}',
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Refund money for selected qty'),
+                        value: refundMoney,
+                        onChanged: (value) => setLocal(() => refundMoney = value ?? true),
+                      ),
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Return stock for selected qty'),
+                        value: returnStock,
+                        onChanged: (value) => setLocal(() => returnStock = value ?? false),
+                      ),
+                      if (refundMoney)
+                        DropdownButtonFormField<String>(
+                          initialValue: method,
+                          decoration: const InputDecoration(labelText: 'Refund method'),
+                          items: [for (final m in methods) DropdownMenuItem(value: m, child: Text(m))],
+                          onChanged: (value) {
+                            if (value != null) setLocal(() => method = value);
+                          },
+                        ),
+                      TextField(controller: reason, decoration: const InputDecoration(labelText: 'Reason (optional)')),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Back')),
+                FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Process')),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (ok != true || !mounted) return;
+
+    final selections = <Map<String, dynamic>>[];
+    for (final entry in selectedQty.entries) {
+      final qty = money(entry.value.text.trim().isEmpty ? '0' : entry.value.text.trim());
+      if (qty > Decimal.zero) {
+        selections.add({'index': entry.key, 'quantity': moneyString(qty)});
+      }
+    }
+    if (selections.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a quantity for at least one item.')));
+      return;
+    }
+    if (!refundMoney && !returnStock) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Choose refund money and/or return stock.')));
+      return;
+    }
+
+    try {
+      final result = await sl<OrderRepository>().refundOrderItems(
+        orderId: readString(row, ['id']),
+        cancellationPassword: password,
+        selections: selections,
+        method: method,
+        reason: reason.text.trim(),
+        refundMoney: refundMoney,
+        returnStock: returnStock,
+      );
+      await _load();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Item action recorded. Status: ${result['status']}.')),
+      );
+    } on Failure catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+    }
   }
 
   Decimal _refundRemaining(Map<String, dynamic> row) {
@@ -372,7 +760,7 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
                       title: const Text('Restore recipe stock'),
                       subtitle: Text(isFull ? 'Returns ingredients to inventory on full refund' : 'Only applies when refund clears the remaining balance'),
                       value: restoreStock && isFull,
-                      onChanged: isFull ? (value) => setLocal(() => restoreStock = value ?? true) : null,
+                      onChanged: isFull ? (value) => setLocal(() => restoreStock = value) : null,
                     ),
                   ],
                 ),

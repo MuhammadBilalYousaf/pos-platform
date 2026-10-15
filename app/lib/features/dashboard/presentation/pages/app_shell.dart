@@ -16,6 +16,7 @@ import '../../../admin/presentation/pages/profile_page.dart';
 import '../../../admin/presentation/bloc/branch_context_cubit.dart';
 import '../../../admin/presentation/widgets/branch_switcher.dart';
 import '../../../orders/presentation/pages/orders_page.dart';
+import '../../../shifts/presentation/pages/shifts_page.dart';
 import '../widgets/business_shell.dart';
 import 'dashboard_page.dart';
 import 'reports_page.dart';
@@ -92,6 +93,12 @@ class _AppShellState extends State<AppShell> {
           icon: Icons.people_outline,
           label: 'Customers',
           builder: (_) => const CustomersPage(),
+        ),
+      if (user.canRunPos || user.canViewReports)
+        WorkbenchDestination(
+          icon: Icons.schedule_outlined,
+          label: 'Shifts',
+          builder: (_) => const ShiftsPage(),
         ),
       if (user.canViewReports)
         WorkbenchDestination(

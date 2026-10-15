@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../../../core/widgets/password_field.dart';
 import '../bloc/auth_bloc.dart';
 import 'super_admin_signup_page.dart';
 
@@ -99,11 +100,8 @@ class _LoginPageState extends State<LoginPage> {
                             textInputAction: TextInputAction.next,
                           ),
                           const SizedBox(height: 16),
-                          TextField(
+                          PasswordField(
                             controller: _password,
-                            obscureText: true,
-                            autofillHints: const [AutofillHints.password],
-                            decoration: const InputDecoration(labelText: 'Password'),
                             enabled: !loading,
                             onSubmitted: (_) => _signIn(),
                           ),

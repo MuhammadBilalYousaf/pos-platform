@@ -9,6 +9,7 @@ import '../../../admin/presentation/bloc/branch_context_cubit.dart';
 import '../../../auth/domain/entities/session.dart';
 import '../../../auth/domain/permissions.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
+import '../../../shifts/data/shift_repository.dart';
 import '../../data/dashboard_repository.dart';
 import '../../data/reports_models.dart';
 import '../widgets/report_widgets.dart';
@@ -35,6 +36,10 @@ class _ReportsPageState extends State<ReportsPage> with SingleTickerProviderStat
   String? _filterPayment;
   String? _trendProductId;
   String _trendGranularity = 'Daily';
+  ReportDateBasis _dateBasis = ReportDateBasis.calendar;
+  List<PosShift> _shifts = const [];
+  String? _shiftId;
+  List<ShiftSummary> _shiftSummaries = const [];
 
   static const _presets = [
     'Today',
@@ -49,6 +54,7 @@ class _ReportsPageState extends State<ReportsPage> with SingleTickerProviderStat
   static const _tabLabels = [
     'Overview',
     'Sales',
+    'Shifts',
     'Products',
     'Categories',
     'Branches',
@@ -123,6 +129,11 @@ class _ReportsPageState extends State<ReportsPage> with SingleTickerProviderStat
     try {
       final auth = context.read<AuthBloc>().state;
       final branches = auth is AuthAuthenticated ? auth.session.accessibleBranches : const <BranchProfile>[];
+      final shifts = await sl<ShiftRepository>().listShifts(limit: 80);
+      final summaries = <ShiftSummary>[];
+      for (final shift in shifts.take(20)) {
+        summaries.add(await sl<ShiftRepository>().summarizeShift(shift));
+      }
       final data = await sl<DashboardRepository>().analyticsRange(
         from: _from,
         to: _to,
@@ -132,10 +143,17 @@ class _ReportsPageState extends State<ReportsPage> with SingleTickerProviderStat
           productId: _filterProductId,
           employeeKey: _filterEmployee,
           paymentMethod: _filterPayment,
+          dateBasis: _dateBasis,
+          shiftId: _dateBasis == ReportDateBasis.shift ? _shiftId : null,
         ),
       );
       if (!mounted) return;
       setState(() {
+        _shifts = shifts;
+        _shiftSummaries = summaries;
+        if (_shiftId != null && !_shifts.any((s) => s.id == _shiftId)) {
+          _shiftId = _shifts.isEmpty ? null : _shifts.first.id;
+        }
         _data = data;
         _trendProductId ??= data.productCatalog.isEmpty ? null : data.productCatalog.first.id;
         _loading = false;
@@ -186,6 +204,50 @@ class _ReportsPageState extends State<ReportsPage> with SingleTickerProviderStat
           title: 'Reports',
           subtitle: 'Analyze your business performance with detailed reports and insights.',
           actions: [
+            DropdownButtonHideUnderline(
+              child: DropdownButton<ReportDateBasis>(
+                value: _dateBasis,
+                items: const [
+                  DropdownMenuItem(value: ReportDateBasis.calendar, child: Text('By calendar date')),
+                  DropdownMenuItem(value: ReportDateBasis.businessDay, child: Text('By business day')),
+                  DropdownMenuItem(value: ReportDateBasis.shift, child: Text('By shift')),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() {
+                    _dateBasis = value;
+                    if (value == ReportDateBasis.shift && _shiftId == null && _shifts.isNotEmpty) {
+                      _shiftId = _shifts.first.id;
+                    }
+                  });
+                  _load();
+                },
+              ),
+            ),
+            if (_dateBasis == ReportDateBasis.shift) ...[
+              const SizedBox(width: 8),
+              DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: _shiftId != null && _shifts.any((s) => s.id == _shiftId) ? _shiftId : null,
+                  hint: const Text('Select shift'),
+                  items: [
+                    for (final shift in _shifts)
+                      DropdownMenuItem(
+                        value: shift.id,
+                        child: Text(
+                          '${shift.businessDay} · ${DateFormat('MMM d, h:mm a').format(shift.startedAt)}'
+                          '${shift.endedAt == null ? ' (open)' : ''}',
+                        ),
+                      ),
+                  ],
+                  onChanged: (value) {
+                    setState(() => _shiftId = value);
+                    _load();
+                  },
+                ),
+              ),
+            ],
+            const SizedBox(width: 8),
             _DateRangeButton(
               from: _from,
               to: _to,
@@ -255,6 +317,17 @@ class _ReportsPageState extends State<ReportsPage> with SingleTickerProviderStat
                                 onGranularity: (v) => setState(() => _trendGranularity = v),
                               ),
                               _SalesTab(data: _data!, granularity: _trendGranularity, onGranularity: (v) => setState(() => _trendGranularity = v)),
+                              _ShiftsTab(
+                                summaries: _shiftSummaries,
+                                selectedShiftId: _shiftId,
+                                onSelect: (id) {
+                                  setState(() {
+                                    _dateBasis = ReportDateBasis.shift;
+                                    _shiftId = id;
+                                  });
+                                  _load();
+                                },
+                              ),
                               _ProductsTab(
                                 data: _data!,
                                 sortTopByUnits: _sortTopByUnits,
@@ -795,6 +868,53 @@ class _TrendByGranularity extends StatelessWidget {
         }
         return ReportSalesLineChart(days: data.daily);
     }
+  }
+}
+
+class _ShiftsTab extends StatelessWidget {
+  const _ShiftsTab({
+    required this.summaries,
+    required this.selectedShiftId,
+    required this.onSelect,
+  });
+
+  final List<ShiftSummary> summaries;
+  final String? selectedShiftId;
+  final ValueChanged<String> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    if (summaries.isEmpty) {
+      return const Center(
+        child: Text('No shifts yet. Start a shift from the Shifts screen — midnight-crossing sales stay on that business day.'),
+      );
+    }
+    return ListView(
+      children: [
+        const Text(
+          'Shift-wise sales (independent of calendar midnight). Open the shift filter above to analyze one shift in the other tabs.',
+          style: TextStyle(color: kReportMuted),
+        ),
+        const SizedBox(height: 12),
+        for (final row in summaries)
+          Card(
+            child: ListTile(
+              selected: row.shift.id == selectedShiftId,
+              title: Text('${row.shift.businessDay} · ${row.shift.status}'),
+              subtitle: Text(
+                'Start ${DateFormat('MMM d, h:mm a').format(row.shift.startedAt)}'
+                '${row.shift.endedAt == null ? '' : ' → ${DateFormat('MMM d, h:mm a').format(row.shift.endedAt!)}'}\n'
+                'Orders ${row.orderCount} · Sales Rs. ${row.salesTotal} · Refunds Rs. ${row.refundTotal} · Cancels ${row.cancelCount}',
+              ),
+              isThreeLine: true,
+              trailing: TextButton(
+                onPressed: () => onSelect(row.shift.id),
+                child: const Text('Analyze'),
+              ),
+            ),
+          ),
+      ],
+    );
   }
 }
 

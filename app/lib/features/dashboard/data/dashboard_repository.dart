@@ -9,24 +9,36 @@ import '../../auth/domain/entities/session.dart';
 import 'home_dashboard_models.dart';
 import 'reports_models.dart';
 
+/// How report date ranges are applied to orders.
+/// - calendar: wall-clock created_at date
+/// - businessDay: shift business_day (midnight-crossing stay on open day)
+/// - shift: filter by a specific shift_id
+enum ReportDateBasis { calendar, businessDay, shift }
+
 class ReportFilters {
   const ReportFilters({
     this.categoryId,
     this.productId,
     this.employeeKey,
     this.paymentMethod,
+    this.dateBasis = ReportDateBasis.calendar,
+    this.shiftId,
   });
 
   final String? categoryId;
   final String? productId;
   final String? employeeKey;
   final String? paymentMethod;
+  final ReportDateBasis dateBasis;
+  final String? shiftId;
 
   bool get hasAny =>
       (categoryId != null && categoryId!.isNotEmpty) ||
       (productId != null && productId!.isNotEmpty) ||
       (employeeKey != null && employeeKey!.isNotEmpty) ||
-      (paymentMethod != null && paymentMethod!.isNotEmpty);
+      (paymentMethod != null && paymentMethod!.isNotEmpty) ||
+      (shiftId != null && shiftId!.isNotEmpty) ||
+      dateBasis != ReportDateBasis.calendar;
 }
 
 class DashboardSnapshot {
@@ -495,6 +507,8 @@ class DashboardRepository {
             employeeKey: createdBy.isNotEmpty ? createdBy : cashier,
             items: items,
             payments: payments,
+            businessDay: readString(data, ['business_day', 'businessDay']),
+            shiftId: readString(data, ['shift_id', 'shiftId']),
           ),
         );
       }
@@ -538,10 +552,27 @@ class DashboardRepository {
         return true;
       }
 
+      bool inDateBasis(_OrderRow o, DateTime start, DateTime endExclusive) {
+        if (filters.dateBasis == ReportDateBasis.shift) {
+          final wanted = filters.shiftId ?? '';
+          return wanted.isNotEmpty && o.shiftId == wanted;
+        }
+        if (filters.dateBasis == ReportDateBasis.businessDay) {
+          // Prefer stored business_day; fall back to calendar date of created_at.
+          final day = o.businessDay.isNotEmpty
+              ? o.businessDay
+              : '${o.at.year.toString().padLeft(4, '0')}-${o.at.month.toString().padLeft(2, '0')}-${o.at.day.toString().padLeft(2, '0')}';
+          final parsed = DateTime.tryParse(day);
+          if (parsed == null) return !o.at.isBefore(start) && o.at.isBefore(endExclusive);
+          return !parsed.isBefore(start) && parsed.isBefore(endExclusive);
+        }
+        return !o.at.isBefore(start) && o.at.isBefore(endExclusive);
+      }
+
       List<_OrderRow> inWindow(DateTime start, DateTime endExclusive, {bool includeCancelled = false}) {
         return [
           for (final o in allOrders)
-            if (!o.at.isBefore(start) && o.at.isBefore(endExclusive))
+            if (inDateBasis(o, start, endExclusive))
               if (includeCancelled || (o.status != 'CANCELLED' && o.status != 'REFUNDED'))
                 if (passFilters(o)) o,
         ];
@@ -551,7 +582,7 @@ class DashboardRepository {
       final previous = inWindow(prevStart, prevEnd);
       final cancelled = [
         for (final o in allOrders)
-          if (!o.at.isBefore(rangeStart) && o.at.isBefore(rangeEnd) && o.status == 'CANCELLED')
+          if (inDateBasis(o, rangeStart, rangeEnd) && o.status == 'CANCELLED')
             if (passFilters(o)) o,
       ];
 
@@ -1064,6 +1095,8 @@ class _OrderRow {
     required this.employeeKey,
     required this.items,
     required this.payments,
+    this.businessDay = '',
+    this.shiftId = '',
   });
 
   final DateTime at;
@@ -1077,6 +1110,8 @@ class _OrderRow {
   final String employeeKey;
   final List<_LineRow> items;
   final List<_PayRow> payments;
+  final String businessDay;
+  final String shiftId;
 
   Decimal get netTotal {
     if (status == 'REFUNDED') return Decimal.zero;

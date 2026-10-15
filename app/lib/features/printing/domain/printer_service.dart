@@ -281,12 +281,13 @@ class ThermalPrinterService implements PrinterService {
 
   @override
   Future<List<String>> availablePrinters() async {
+    _invalidatePrinterCache();
     final printers = _transport.listPrinters();
     final saved = _settings.selectedPrinter;
     if (saved != null && printers.any((name) => name.toLowerCase() == saved.toLowerCase())) {
       return printers;
     }
-    final preferred = printers.where((name) => !_isVirtualPrinter(name)).toList();
+    final preferred = printers.where((name) => !isVirtualPrinter(name)).toList();
     if (saved == null && preferred.length == 1) {
       await _settings.save(preferred.first);
     }
@@ -297,24 +298,71 @@ class ThermalPrinterService implements PrinterService {
   String? scanWarning() => _transport.pluggedInWithoutDriver();
 
   @override
-  Future<void> configurePrinter(String? name) => _settings.save(name);
+  Future<void> configurePrinter(String? name) async {
+    _invalidatePrinterCache();
+    if (name != null && isVirtualPrinter(name)) {
+      throw StateError(
+        '"$name" is a virtual printer (PDF/XPS/OneNote). '
+        'Choose the USB thermal receipt printer instead.',
+      );
+    }
+    await _settings.save(name);
+  }
+
+  List<String>? _printerCache;
+  DateTime? _printerCacheAt;
+
+  void _invalidatePrinterCache() {
+    _printerCache = null;
+    _printerCacheAt = null;
+  }
+
+  List<String> _cachedPrinters() {
+    final now = DateTime.now();
+    if (_printerCache != null &&
+        _printerCacheAt != null &&
+        now.difference(_printerCacheAt!) < const Duration(seconds: 30)) {
+      return _printerCache!;
+    }
+    _printerCache = _transport.listPrinters();
+    _printerCacheAt = now;
+    return _printerCache!;
+  }
+
+  String? _resolvePrinterName(String? configured, List<String> known) {
+    if (configured == null || configured.trim().isEmpty) return null;
+    for (final name in known) {
+      if (name.toLowerCase() == configured.trim().toLowerCase()) return name;
+    }
+    return null;
+  }
 
   @override
   Future<void> printReceipt(ReceiptData receipt) async {
-    final known = _transport.listPrinters();
-    var printer = _settings.selectedPrinter;
-    final stillThere = printer != null && known.any((name) => name.toLowerCase() == printer!.toLowerCase());
-    if (!stillThere) {
-      final preferred = known.where((name) => !_isVirtualPrinter(name)).toList();
+    final known = _cachedPrinters();
+    var printer = _resolvePrinterName(_settings.selectedPrinter, known);
+    if (printer != null && isVirtualPrinter(printer)) {
+      printer = null;
+    }
+    if (printer == null) {
+      final preferred = known.where((name) => !isVirtualPrinter(name)).toList();
       printer = preferred.length == 1 ? preferred.first : null;
       if (printer != null) await _settings.save(printer);
     }
-    if (printer == null || printer.isEmpty) throw PrinterNotConfiguredException();
-    _transport.send(printer, _encoder.encode(receipt));
+    if (printer == null || printer.isEmpty) {
+      final warning = _transport.pluggedInWithoutDriver();
+      if (warning != null) throw StateError(warning);
+      throw PrinterNotConfiguredException();
+    }
+    final bytes = _encoder.encode(receipt);
+    if (bytes.isEmpty) {
+      throw StateError('Receipt encoding produced no data.');
+    }
+    _transport.send(printer, bytes);
   }
 }
 
-bool _isVirtualPrinter(String name) {
+bool isVirtualPrinter(String name) {
   final value = name.toLowerCase();
   return value.contains('pdf') ||
       value.contains('xps') ||

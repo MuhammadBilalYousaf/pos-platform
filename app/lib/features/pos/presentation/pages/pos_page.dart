@@ -12,6 +12,7 @@ import '../bloc/order_cubit.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/firebase/tenant_context.dart';
 import '../../../../core/utils/order_totals.dart';
+import '../../../../core/utils/recipe_cost.dart';
 import '../../../../core/widgets/admin_ui_kit.dart';
 
 class PosPage extends StatefulWidget {
@@ -24,6 +25,8 @@ class PosPage extends StatefulWidget {
 class _PosPageState extends State<PosPage> {
   final _search = TextEditingController();
   final _searchFocus = FocusNode();
+  /// productId -> recipe cost for default variant (current stock costs).
+  Map<String, String> _productCosts = const {};
 
   @override
   void initState() {
@@ -34,7 +37,49 @@ class _PosPageState extends State<PosPage> {
       if (auth is AuthAuthenticated) {
         context.read<CartCubit>().setTaxRate(auth.session.business?.taxRate ?? '0');
       }
+      _loadRecipeCosts();
     });
+  }
+
+  Future<void> _loadRecipeCosts() async {
+    try {
+      final recipes = await sl<AdminRepository>().listRecipes();
+      final ingredients = await sl<AdminRepository>().listIngredients();
+      final costs = {
+        for (final item in ingredients)
+          item.id: IngredientCostSnapshot(
+            ingredientId: item.id,
+            name: item.name,
+            unitCostPerBase: money(item.unitCostPerBase.isEmpty ? '0' : item.unitCostPerBase),
+            unit: item.unit,
+          ),
+      };
+      if (!mounted) return;
+      final catalog = context.read<CatalogCubit>().state.catalog;
+      final byProduct = <String, String>{};
+      for (final recipe in recipes) {
+        CatalogProduct? product;
+        if (catalog != null) {
+          for (final item in catalog.products) {
+            if (item.id == recipe.productId) {
+              product = item;
+              break;
+            }
+          }
+        }
+        final variant = product?.defaultVariant;
+        final breakdown = RecipeCostCalculator.forVariant(
+          recipe: recipe,
+          costsByIngredient: costs,
+          variantId: variant?.id,
+          variantName: variant?.name,
+          sellPrice: variant?.price,
+        );
+        byProduct[recipe.productId] = moneyString(breakdown.totalCost);
+      }
+      if (!mounted) return;
+      setState(() => _productCosts = byProduct);
+    } catch (_) {}
   }
 
   @override
@@ -58,15 +103,44 @@ class _PosPageState extends State<PosPage> {
               content: SizedBox(
                 width: 360,
                 child: SingleChildScrollView(
-                  child: SelectableText(state.receipt.toPreviewText(), style: const TextStyle(fontFamily: 'Consolas', fontSize: 13)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (state.stockWarnings.isNotEmpty) ...[
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFEF3C7),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            state.stockWarnings.join('\n'),
+                            style: const TextStyle(fontSize: 12, color: Color(0xFF92400E)),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                      SelectableText(state.receipt.toPreviewText(), style: const TextStyle(fontFamily: 'Consolas', fontSize: 13)),
+                    ],
+                  ),
                 ),
               ),
               actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    context.read<CartCubit>().clear();
+                  },
+                  child: const Text('New order'),
+                ),
                 TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
               ],
             ),
           );
           if (context.mounted) context.read<OrderCubit>().acknowledge();
+        } else if (state is OrderPrintIssue) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(state.message)));
+          context.read<OrderCubit>().acknowledge();
         } else if (state is OrderFailure) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(state.message)));
           context.read<OrderCubit>().acknowledge();
@@ -81,7 +155,7 @@ class _PosPageState extends State<PosPage> {
                 Expanded(
                   child: ColoredBox(
                     color: kAdminPageBg,
-                    child: _ProductPane(search: _search, searchFocus: _searchFocus),
+                    child: _ProductPane(search: _search, searchFocus: _searchFocus, productCosts: _productCosts),
                   ),
                 ),
                 SizedBox(
@@ -97,7 +171,7 @@ class _PosPageState extends State<PosPage> {
               children: [
                 const _VerticalCategories(),
                 _SearchBar(controller: _search, focusNode: _searchFocus),
-                const Expanded(child: _ProductGrid()),
+                Expanded(child: _ProductGrid(productCosts: _productCosts)),
                 const SizedBox(height: 280, child: _CartPane(compact: true)),
               ],
             ),
@@ -323,9 +397,10 @@ class _PosCategoryButtonState extends State<_PosCategoryButton> with SingleTicke
 }
 
 class _ProductPane extends StatelessWidget {
-  const _ProductPane({required this.search, required this.searchFocus});
+  const _ProductPane({required this.search, required this.searchFocus, required this.productCosts});
   final TextEditingController search;
   final FocusNode searchFocus;
+  final Map<String, String> productCosts;
 
   @override
   Widget build(BuildContext context) {
@@ -334,14 +409,15 @@ class _ProductPane extends StatelessWidget {
       children: [
         const _VerticalCategories(),
         _SearchBar(controller: search, focusNode: searchFocus),
-        const Expanded(child: _ProductGrid()),
+        Expanded(child: _ProductGrid(productCosts: productCosts)),
       ],
     );
   }
 }
 
 class _ProductGrid extends StatelessWidget {
-  const _ProductGrid();
+  const _ProductGrid({required this.productCosts});
+  final Map<String, String> productCosts;
 
   @override
   Widget build(BuildContext context) {
@@ -370,12 +446,16 @@ class _ProductGrid extends StatelessWidget {
             maxCrossAxisExtent: 200,
             mainAxisSpacing: 12,
             crossAxisSpacing: 12,
-            childAspectRatio: 1.05,
+            childAspectRatio: 0.95,
           ),
           itemCount: products.length,
           itemBuilder: (context, index) {
             final product = products[index];
             final variant = product.defaultVariant;
+            final cost = productCosts[product.id];
+            final margin = cost == null || cost.isEmpty
+                ? null
+                : money(variant.price) - money(cost);
             return InkWell(
               onTap: () => _add(context, product),
               child: Ink(
@@ -405,7 +485,19 @@ class _ProductGrid extends StatelessWidget {
                       const SizedBox(height: 8),
                       Text(product.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
                       if (product.sku != null) Text(product.sku!, style: const TextStyle(color: kAdminMuted, fontSize: 11)),
-                      Text('Rs. ${variant.price}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: kAdminAccent)),
+                      if (product.productType.toUpperCase() == 'RECIPE')
+                        const Padding(
+                          padding: EdgeInsets.only(top: 2),
+                          child: Text('Recipe stock', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Color(0xFFB45309))),
+                        ),
+                      Text('Sell Rs. ${variant.price}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: kAdminAccent)),
+                      if (cost != null)
+                        Text(
+                          'Cost Rs. $cost${margin == null ? '' : ' · margin Rs. ${moneyString(margin)}'}',
+                          style: const TextStyle(fontSize: 10, color: kAdminMuted, fontWeight: FontWeight.w600),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                     ],
                   ),
                 ),
@@ -547,6 +639,14 @@ class _CartPane extends StatelessWidget {
                     const SizedBox(height: 8),
                     Row(
                       children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            style: adminOutlinedButtonStyle,
+                            onPressed: () => context.read<CartCubit>().clear(),
+                            child: const Text('New order'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: OutlinedButton(
                             style: adminOutlinedButtonStyle,
@@ -863,7 +963,9 @@ class PosShortcuts extends StatelessWidget {
   Widget build(BuildContext context) {
     return CallbackShortcuts(
       bindings: {
+        // F2 / Ctrl+N: clear cart and start a new order (does not conflict with F3/F4).
         const SingleActivator(LogicalKeyboardKey.f2): () => context.read<CartCubit>().clear(),
+        const SingleActivator(LogicalKeyboardKey.keyN, control: true): () => context.read<CartCubit>().clear(),
         const SingleActivator(LogicalKeyboardKey.f3): () => context.read<CartCubit>().holdTicket(),
         const SingleActivator(LogicalKeyboardKey.f4): () => payCurrentSale(context),
       },

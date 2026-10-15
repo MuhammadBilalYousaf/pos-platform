@@ -48,6 +48,40 @@ class PosRole {
         return const [];
     }
   }
+
+  /// Higher number = higher authority.
+  static int rank(String role) {
+    switch (role) {
+      case platformSuperAdmin:
+        return 100;
+      case businessAdmin:
+        return 80;
+      case branchManager:
+        return 50;
+      case cashier:
+        return 10;
+      default:
+        return 0;
+    }
+  }
+
+  /// Staff the actor may list (never peers/superiors for managers — only roles they can hire).
+  static bool canViewStaffRole(String actorRole, String targetRole) {
+    if (targetRole == platformSuperAdmin && actorRole != platformSuperAdmin) {
+      return false;
+    }
+    return invitableBy(actorRole).contains(targetRole);
+  }
+
+  /// Staff the actor may edit or deactivate (same set as viewable/hireable roles).
+  static bool canEditStaffRole(String actorRole, String targetRole) {
+    return canViewStaffRole(actorRole, targetRole);
+  }
+
+  /// Whether the actor may assign [newRole] to someone.
+  static bool canAssignRole(String actorRole, String newRole) {
+    return invitableBy(actorRole).contains(newRole);
+  }
 }
 
 class PosPermissions {

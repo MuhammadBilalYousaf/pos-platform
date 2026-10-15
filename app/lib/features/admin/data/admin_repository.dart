@@ -5,6 +5,7 @@ import '../../../core/firebase/firestore_host.dart';
 import '../../../core/firebase/tenant_context.dart';
 import '../../../core/utils/json_read.dart';
 import '../../../core/utils/order_totals.dart';
+import '../../../core/utils/password_hash.dart';
 import '../../../core/utils/stock_units.dart';
 import '../../auth/data/datasources/firebase_auth_datasource.dart';
 import '../../auth/data/seed/turknroll_seed.dart';
@@ -41,6 +42,8 @@ class InventoryItem {
     this.sku,
     this.unit = 'PCS',
     this.kind = 'INGREDIENT',
+    this.unitCost = '0',
+    this.unitCostPerBase = '0',
   });
 
   final String id;
@@ -50,6 +53,10 @@ class InventoryItem {
   final String? sku;
   final String unit;
   final String kind;
+  /// Cost in money for one display [unit] (e.g. Rs per KG).
+  final String unitCost;
+  /// Cost per stored base unit (G / ML / PCS).
+  final String unitCostPerBase;
 }
 
 class InventoryTransaction {
@@ -120,12 +127,19 @@ class IngredientOption {
     required this.name,
     this.unit = 'PCS',
     this.kind = 'INGREDIENT',
+    this.unitCostPerBase = '0',
+    this.onHandBase = '0',
+    this.reorderLevel = '0',
   });
 
   final String id;
   final String name;
   final String unit;
   final String kind;
+  /// Average / last purchase cost per base unit (G/ML/PCS).
+  final String unitCostPerBase;
+  final String onHandBase;
+  final String reorderLevel;
 }
 
 class PosCustomer {
@@ -273,6 +287,7 @@ class AdminRepository {
         query = ids.length == 1 ? query.where('branchId', isEqualTo: ids.first) : query.where('branchId', whereIn: ids.take(30).toList());
       }
       final snap = await query.get();
+      final actorRole = _tenant.role ?? '';
       return snap.docs.map((doc) {
         final data = asStringKeyMap(doc.data());
         final memberBranch = pick(data, ['branchId', 'branch_id'])?.toString();
@@ -287,6 +302,7 @@ class AdminRepository {
           active: data.containsKey('active') ? readBool(data, ['active']) : true,
         );
       }).where((row) {
+        if (!PosRole.canViewStaffRole(actorRole, row.role)) return false;
         if (selected == null) return true;
         return row.branchId == selected || row.branchIds.contains(selected);
       }).toList();
@@ -304,7 +320,7 @@ class AdminRepository {
     List<String> extraBranchIds = const [],
   }) async {
     try {
-      if (!PosRole.invitableBy(_tenant.role ?? '').contains(role)) {
+      if (!PosRole.canAssignRole(_tenant.role ?? '', role)) {
         throw const Failure('You cannot create that role.');
       }
       if (role == PosRole.platformSuperAdmin) {
@@ -411,6 +427,62 @@ class AdminRepository {
         if (receiptFooter != null) 'receipt_footer': receiptFooter,
       }, SetOptions(merge: true));
     } catch (error) {
+      throw mapFirebaseFailure(error);
+    }
+  }
+
+  /// Sets or changes the order-cancellation password (Business Admin only).
+  /// Stores a one-way hash — plaintext is never written to Firestore.
+  Future<void> setOrderCancellationPassword(String password) async {
+    try {
+      if (_tenant.role != PosRole.businessAdmin && _tenant.role != PosRole.platformSuperAdmin) {
+        throw const Failure('Only a Business Admin can set the cancellation password.');
+      }
+      final trimmed = password.trim();
+      if (trimmed.length < 4) {
+        throw const Failure('Cancellation password must be at least 4 characters.');
+      }
+      final businessId = _tenant.requireBusinessId();
+      final hash = hashBusinessSecret(trimmed, businessId: businessId);
+      await _firestore.requireDb().collection('businesses').doc(businessId).set({
+        'order_cancel_password_hash': hash,
+        'order_cancel_password_updated_at': FieldValue.serverTimestamp(),
+        'order_cancel_password_updated_by': _tenant.userId,
+      }, SetOptions(merge: true));
+      await writeAudit(action: 'settings.cancel_password', detail: 'updated');
+    } catch (error) {
+      if (error is Failure) rethrow;
+      throw mapFirebaseFailure(error);
+    }
+  }
+
+  Future<bool> hasOrderCancellationPassword() async {
+    try {
+      final businessId = _tenant.requireBusinessId();
+      final snap = await _firestore.requireDb().collection('businesses').doc(businessId).get();
+      final data = asStringKeyMap(snap.data());
+      return readString(data, ['order_cancel_password_hash']).isNotEmpty;
+    } catch (error) {
+      throw mapFirebaseFailure(error);
+    }
+  }
+
+  /// Validates the cancellation password against the stored hash.
+  /// Does not return the hash or plaintext to callers.
+  Future<void> verifyOrderCancellationPassword(String password) async {
+    try {
+      final businessId = _tenant.requireBusinessId();
+      final snap = await _firestore.requireDb().collection('businesses').doc(businessId).get();
+      final data = asStringKeyMap(snap.data());
+      final stored = readString(data, ['order_cancel_password_hash']);
+      if (stored.isEmpty) {
+        throw const Failure('No cancellation password is configured. Ask a Business Admin to set one in Settings.');
+      }
+      if (!matchesBusinessSecret(input: password, storedHash: stored, businessId: businessId)) {
+        throw const Failure('Incorrect cancellation password.');
+      }
+    } catch (error) {
+      if (error is Failure) rethrow;
       throw mapFirebaseFailure(error);
     }
   }
@@ -533,6 +605,29 @@ class AdminRepository {
     }
   }
 
+  /// Converts a display-unit purchase cost (Rs per KG/L/PCS/…) into cost per base unit.
+  static Decimal unitCostToBase(String unitCost, String unit) {
+    final cost = money(unitCost.isEmpty ? '0' : unitCost);
+    switch (StockUnits.normalize(unit)) {
+      case 'KG':
+      case 'L':
+        return (cost / Decimal.fromInt(1000)).toDecimal(scaleOnInfinitePrecision: 6);
+      default:
+        return cost;
+    }
+  }
+
+  static String unitCostFromBase(String unitCostPerBase, String unit) {
+    final cost = money(unitCostPerBase.isEmpty ? '0' : unitCostPerBase);
+    switch (StockUnits.normalize(unit)) {
+      case 'KG':
+      case 'L':
+        return moneyString(cost * Decimal.fromInt(1000));
+      default:
+        return moneyString(cost);
+    }
+  }
+
   Future<List<InventoryItem>> listInventory() async {
     try {
       final businessId = _tenant.requireBusinessId();
@@ -540,6 +635,7 @@ class AdminRepository {
       return snap.docs.map((doc) {
         final data = asStringKeyMap(doc.data());
         final unit = readString(data, ['unit'], 'PCS');
+        final perBase = readString(data, ['unit_cost_per_base', 'unitCostPerBase'], '0');
         return InventoryItem(
           id: doc.id,
           name: readString(data, ['ingredient_name', 'ingredientName', 'name']),
@@ -548,6 +644,8 @@ class AdminRepository {
           sku: pick(data, ['ingredient_id', 'sku'])?.toString(),
           unit: unit,
           kind: readString(data, ['kind'], 'INGREDIENT'),
+          unitCostPerBase: perBase,
+          unitCost: unitCostFromBase(perBase, unit),
         );
       }).where((item) {
         final parts = item.id.split('_');
@@ -566,6 +664,7 @@ class AdminRepository {
     required String kind,
     required String quantity,
     required String reorderLevel,
+    String? unitCost,
   }) async {
     try {
       final businessId = _tenant.requireBusinessId();
@@ -575,11 +674,18 @@ class AdminRepository {
       }
       final normalizedUnit = StockUnits.normalize(unit);
       final storedQty = moneyString(StockUnits.toBase(quantity.isEmpty ? '0' : quantity, normalizedUnit));
+      final costPerBase = unitCost == null || unitCost.trim().isEmpty
+          ? money(item.unitCostPerBase.isEmpty ? '0' : item.unitCostPerBase)
+          : unitCostToBase(unitCost.trim(), normalizedUnit);
+      if (costPerBase < Decimal.zero) {
+        throw const Failure('Unit cost cannot be negative.');
+      }
       final db = _firestore.requireDb().collection('businesses').doc(businessId);
       await db.collection('ingredients').doc(ingredientId).set({
         'name': name,
         'unit': normalizedUnit,
         'kind': kind,
+        'unit_cost_per_base': moneyString(costPerBase),
       }, SetOptions(merge: true));
       await db.collection('inventory').doc(item.id).set({
         'ingredient_name': name,
@@ -587,6 +693,7 @@ class AdminRepository {
         'kind': kind,
         'quantity_base': storedQty,
         'reorder_level': reorderLevel.isEmpty ? '0' : reorderLevel,
+        'unit_cost_per_base': moneyString(costPerBase),
       }, SetOptions(merge: true));
       await writeAudit(action: 'inventory.update', detail: name);
     } catch (error) {
@@ -596,9 +703,11 @@ class AdminRepository {
   }
 
   /// Adds a received purchase onto current stock. Does not replace the quantity already on hand.
+  /// Optional [unitCost] is the purchase cost for the entered quantity (updates weighted average cost).
   Future<void> receivePurchase({
     required String ingredientId,
     required String quantity,
+    String? unitCost,
   }) async {
     try {
       final businessId = _tenant.requireBusinessId();
@@ -617,7 +726,8 @@ class AdminRepository {
       }
       final inventoryId = '${branchId}_$id';
       final inventoryRef = db.collection('inventory').doc(inventoryId);
-      if (!(await inventoryRef.get()).exists) {
+      final existingSnap = await inventoryRef.get();
+      if (!existingSnap.exists) {
         await inventoryRef.set({
           'id': inventoryId,
           'business_id': businessId,
@@ -628,9 +738,38 @@ class AdminRepository {
           'unit': unit,
           'kind': readString(ingredient, ['kind'], 'INGREDIENT'),
           'reorder_level': '0',
+          'unit_cost_per_base': '0',
         });
       }
+      Decimal? avgCost;
+      Decimal? newCostPerBase;
+      if (unitCost != null && unitCost.trim().isNotEmpty) {
+        final totalPaid = parseMoneyInputOrThrow(unitCost, label: 'Purchase cost');
+        if (totalPaid < Decimal.zero) {
+          throw const Failure('Purchase cost cannot be negative.');
+        }
+        final stock = asStringKeyMap((await inventoryRef.get()).data());
+        final currentQty = money(readString(stock, ['quantity_base', 'quantityBase'], '0'));
+        final currentCost = money(readString(stock, ['unit_cost_per_base', 'unitCostPerBase'], '0'));
+        newCostPerBase = received > Decimal.zero
+            ? (totalPaid / received).toDecimal(scaleOnInfinitePrecision: 6)
+            : Decimal.zero;
+        final combinedQty = currentQty + received;
+        final numerator = (currentCost * currentQty) + (newCostPerBase * received);
+        avgCost = combinedQty > Decimal.zero
+            ? (numerator / combinedQty).toDecimal(scaleOnInfinitePrecision: 6)
+            : newCostPerBase;
+        await inventoryRef.set({'unit_cost_per_base': moneyString(avgCost)}, SetOptions(merge: true));
+        await db.collection('ingredients').doc(id).set({
+          'unit_cost_per_base': moneyString(avgCost),
+          'last_purchase_cost_per_base': moneyString(newCostPerBase),
+        }, SetOptions(merge: true));
+      }
       await adjustStock(inventoryId: inventoryId, delta: moneyString(received), reason: 'Purchase');
+      // Re-apply cost after adjust in case adjust overwrote merge fields on some paths.
+      if (avgCost != null && newCostPerBase != null) {
+        await inventoryRef.set({'unit_cost_per_base': moneyString(avgCost)}, SetOptions(merge: true));
+      }
       await saveNamed(
         collection: 'purchases',
         name: readString(ingredient, ['name'], id),
@@ -639,6 +778,7 @@ class AdminRepository {
           'quantity': quantity,
           'unit': StockUnits.normalize(unit),
           'quantity_base': moneyString(received),
+          if (unitCost != null && unitCost.trim().isNotEmpty) 'purchase_cost': unitCost.trim(),
           'branch_id': branchId,
           'status': 'Received',
           'created_by': _tenant.userId,
@@ -657,23 +797,32 @@ class AdminRepository {
     String? sku,
     String unit = 'PCS',
     String kind = 'INGREDIENT',
+    String? unitCost,
   }) async {
     try {
       final businessId = _tenant.requireBusinessId();
       final branchId = _tenant.requireBranchId();
       final ingredientId = _slug(sku == null || sku.isEmpty ? name : sku).toUpperCase();
+      final normalizedUnit = StockUnits.normalize(unit);
+      final costPerBase = unitCost == null || unitCost.trim().isEmpty
+          ? Decimal.zero
+          : unitCostToBase(unitCost.trim(), normalizedUnit);
+      if (costPerBase < Decimal.zero) {
+        throw const Failure('Unit cost cannot be negative.');
+      }
       final db = _firestore.requireDb();
       final business = db.collection('businesses').doc(businessId);
-      await _firestore.requireDb().collection('businesses').doc(businessId).collection('ingredients').doc(ingredientId).set({
+      await business.collection('ingredients').doc(ingredientId).set({
         'id': ingredientId,
         'business_id': businessId,
         'name': name,
         'sku': ingredientId,
-        'unit': unit,
+        'unit': normalizedUnit,
         'kind': kind,
+        'unit_cost_per_base': moneyString(costPerBase),
       }, SetOptions(merge: true));
       final inventoryId = '${branchId}_$ingredientId';
-      final storedQty = moneyString(StockUnits.toBase(quantity.isEmpty ? '0' : quantity, unit));
+      final storedQty = moneyString(StockUnits.toBase(quantity.isEmpty ? '0' : quantity, normalizedUnit));
       await business.collection('inventory').doc(inventoryId).set({
         'id': inventoryId,
         'business_id': businessId,
@@ -681,11 +830,13 @@ class AdminRepository {
         'ingredient_id': ingredientId,
         'ingredient_name': name,
         'quantity_base': storedQty,
-        'unit': unit,
+        'unit': normalizedUnit,
         'kind': kind,
         'reorder_level': reorderLevel,
+        'unit_cost_per_base': moneyString(costPerBase),
       }, SetOptions(merge: true));
     } catch (error) {
+      if (error is Failure) rethrow;
       throw mapFirebaseFailure(error);
     }
   }
@@ -811,35 +962,85 @@ class AdminRepository {
     }
   }
 
-  Future<void> updateStaff({
+  /// Updates staff profile. Returns an optional Auth warning (e.g. password reset email sent).
+  Future<String?> updateStaff({
     required String id,
     required String name,
     required String role,
     required String branchId,
+    required String email,
     List<String> branchIds = const [],
     bool active = true,
+    String? newPassword,
+    String? previousEmail,
   }) async {
     try {
+      final actorRole = _tenant.role ?? '';
+      if (id == _tenant.userId) {
+        throw const Failure('You cannot edit your own staff record here.');
+      }
       if (role == PosRole.platformSuperAdmin) {
         throw const Failure('Staff cannot be promoted to Super Admin.');
       }
-      if (!PosRole.invitableBy(_tenant.role ?? '').contains(role) && role != PosRole.cashier) {
+      if (!PosRole.canAssignRole(actorRole, role)) {
         throw const Failure('You cannot assign that role.');
       }
       if (!_tenant.canAccessBranch(branchId)) {
         throw const Failure('You cannot assign staff to that branch.');
       }
+
+      final existingSnap = await _firestore.requireDb().collection('users').doc(id).get();
+      if (!existingSnap.exists) {
+        throw const Failure('Staff member not found.');
+      }
+      final existing = asStringKeyMap(existingSnap.data());
+      final currentRole = readString(existing, ['role']);
+      if (!PosRole.canEditStaffRole(actorRole, currentRole)) {
+        throw Failure(
+          'You cannot edit a ${PosRole.label(currentRole)}. '
+          'Only staff below your role are editable.',
+        );
+      }
+
+      final trimmedEmail = email.trim();
+      if (trimmedEmail.isEmpty || !trimmedEmail.contains('@')) {
+        throw const Failure('Enter a valid email address.');
+      }
+      final password = newPassword?.trim() ?? '';
+      if (password.isNotEmpty && password.length < 6) {
+        throw const Failure('Password must be at least 6 characters.');
+      }
       final ids = branchIds.isEmpty ? [branchId] : branchIds;
       await _firestore.requireDb().collection('users').doc(id).set({
-        'name': name,
+        'name': name.trim(),
+        'email': trimmedEmail,
         'role': role,
         'permissions': PosRole.permissionsFor(role),
         'branchId': branchId,
         'branchIds': ids,
         'active': active,
+        'updated_at': FieldValue.serverTimestamp(),
+        'updated_by': _tenant.userId,
       }, SetOptions(merge: true));
-      await writeAudit(action: active ? 'staff.edit' : 'staff.deactivate', detail: name);
+      await writeAudit(action: active ? 'staff.edit' : 'staff.deactivate', detail: '$name <$trimmedEmail>');
+
+      String? authWarning;
+      final loginEmail = (previousEmail != null && previousEmail.trim().isNotEmpty) ? previousEmail.trim() : trimmedEmail;
+      if (password.isNotEmpty || loginEmail.toLowerCase() != trimmedEmail.toLowerCase()) {
+        try {
+          await _auth.updateUserAuthWithoutSwitching(
+            email: loginEmail,
+            newEmail: trimmedEmail,
+            newPassword: password.isEmpty ? null : password,
+          );
+        } on Failure catch (error) {
+          // Profile is already saved; surface Auth follow-up as a warning.
+          authWarning = error.message;
+        }
+      }
+      return authWarning;
     } catch (error) {
+      if (error is Failure) rethrow;
       throw mapFirebaseFailure(error);
     }
   }
@@ -958,14 +1159,42 @@ class AdminRepository {
             name: readString(asStringKeyMap(doc.data()), ['name'], doc.id),
             unit: readString(asStringKeyMap(doc.data()), ['unit'], 'PCS'),
             kind: readString(asStringKeyMap(doc.data()), ['kind'], 'INGREDIENT'),
+            unitCostPerBase: readString(asStringKeyMap(doc.data()), ['unit_cost_per_base', 'unitCostPerBase'], '0'),
           ),
       };
       final inventorySnap = await business.collection('inventory').get();
       for (final doc in inventorySnap.docs) {
         final data = asStringKeyMap(doc.data());
+        final parts = doc.id.split('_');
+        final branchId = parts.isEmpty ? '' : parts.first;
+        if (!_tenant.matchesBranch(branchId)) continue;
         final id = readString(data, ['ingredient_id', 'ingredientId']);
-        if (id.isEmpty || byId.containsKey(id)) continue;
-        byId[id] = IngredientOption(id: id, name: readString(data, ['ingredient_name', 'ingredientName', 'name'], id));
+        if (id.isEmpty) continue;
+        final onHand = readString(data, ['quantity_base', 'quantityBase'], '0');
+        final reorder = readString(data, ['reorder_level', 'reorderLevel'], '0');
+        final unitCost = readString(data, ['unit_cost_per_base', 'unitCostPerBase'], '0');
+        final existing = byId[id];
+        if (existing == null) {
+          byId[id] = IngredientOption(
+            id: id,
+            name: readString(data, ['ingredient_name', 'ingredientName', 'name'], id),
+            unit: readString(data, ['unit'], 'PCS'),
+            kind: readString(data, ['kind'], 'INGREDIENT'),
+            unitCostPerBase: unitCost,
+            onHandBase: onHand,
+            reorderLevel: reorder,
+          );
+        } else {
+          byId[id] = IngredientOption(
+            id: existing.id,
+            name: existing.name,
+            unit: existing.unit,
+            kind: existing.kind,
+            unitCostPerBase: existing.unitCostPerBase != '0' ? existing.unitCostPerBase : unitCost,
+            onHandBase: onHand,
+            reorderLevel: reorder,
+          );
+        }
       }
       final rows = byId.values.toList();
       rows.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
@@ -1165,51 +1394,128 @@ class AdminRepository {
     required String yieldUnit,
     required List<RecipeLine> components,
   }) async {
-    final branchId = _tenant.requireBranchId();
-    final yieldBase = StockUnits.toBase(yieldQuantity, yieldUnit);
-    if (yieldBase <= Decimal.zero) {
-      throw const Failure('Yield must be greater than zero.');
-    }
-    for (final line in components) {
-      final used = StockUnits.toBase(line.quantity, line.unit);
-      await adjustStock(
-        inventoryId: '${branchId}_${line.ingredientId}',
-        delta: '-${moneyString(used)}',
-        reason: 'Produce $mixtureId',
-      );
-    }
-    final mixId = '${branchId}_$mixtureId';
-    final businessId = _tenant.requireBusinessId();
-    final ref = _firestore.requireDb().collection('businesses').doc(businessId).collection('inventory').doc(mixId);
-    final snap = await ref.get();
-    if (!snap.exists) {
+    try {
+      final branchId = _tenant.requireBranchId();
+      final businessId = _tenant.requireBusinessId();
+      final yieldBase = StockUnits.toBase(yieldQuantity, yieldUnit);
+      if (yieldBase <= Decimal.zero) {
+        throw const Failure('Yield must be greater than zero.');
+      }
+      final lines = components.where((line) => line.ingredientId.trim().isNotEmpty).toList();
+      if (lines.isEmpty) {
+        throw const Failure('Add at least one ingredient to produce this mixture.');
+      }
+      final seen = <String>{};
+      final needs = <String, Decimal>{};
+      final labels = <String, String>{};
+      for (final line in lines) {
+        final ingredientId = line.ingredientId.trim().toUpperCase();
+        if (!seen.add(ingredientId)) {
+          throw Failure('Ingredient $ingredientId is listed more than once. Combine quantities into one row.');
+        }
+        final used = StockUnits.toBase(line.quantity, line.unit);
+        if (used <= Decimal.zero) {
+          throw Failure('Quantity for $ingredientId must be greater than zero.');
+        }
+        needs['${branchId}_$ingredientId'] = used;
+        labels['${branchId}_$ingredientId'] = ingredientId;
+      }
+
+      final db = _firestore.requireDb();
+      final inventory = db.collection('businesses').doc(businessId).collection('inventory');
+      // Validate all stock first so we never partially deduct on failure.
+      for (final entry in needs.entries) {
+        final snap = await inventory.doc(entry.key).get();
+        if (!snap.exists) {
+          throw Failure(
+            'Stock for ${labels[entry.key]} was not found in this branch. Add it under Inventory first.',
+          );
+        }
+        final data = asStringKeyMap(snap.data());
+        final current = money(readString(data, ['quantity_base', 'quantityBase'], '0'));
+        if (current < entry.value) {
+          final name = readString(data, ['ingredient_name', 'ingredientName'], labels[entry.key] ?? entry.key);
+          final unit = readString(data, ['unit'], 'PCS');
+          throw Failure(
+            'Insufficient stock for $name. Need ${StockUnits.fromBase(entry.value, unit)} $unit, available ${StockUnits.fromBase(current, unit)} $unit.',
+          );
+        }
+      }
+
+      var mixtureCost = Decimal.zero;
+      for (final entry in needs.entries) {
+        final snap = await inventory.doc(entry.key).get();
+        final data = asStringKeyMap(snap.data());
+        final unitCost = money(readString(data, ['unit_cost_per_base', 'unitCostPerBase'], '0'));
+        mixtureCost += unitCost * entry.value;
+        await adjustStock(
+          inventoryId: entry.key,
+          delta: '-${moneyString(entry.value)}',
+          reason: 'Produce $mixtureId',
+        );
+      }
+
+      final mixId = '${branchId}_$mixtureId';
+      final ref = inventory.doc(mixId);
+      final snap = await ref.get();
+      final mixtureName = mixtureId;
+      if (!snap.exists) {
+        final ingredientSnap =
+            await db.collection('businesses').doc(businessId).collection('ingredients').doc(mixtureId).get();
+        final ingredientName = ingredientSnap.exists
+            ? readString(asStringKeyMap(ingredientSnap.data()), ['name'], mixtureId)
+            : mixtureName;
+        await ref.set({
+          'id': mixId,
+          'branch_id': branchId,
+          'ingredient_id': mixtureId,
+          'ingredient_name': ingredientName,
+          'quantity_base': '0',
+          'unit': StockUnits.normalize(yieldUnit),
+          'kind': 'MIXTURE',
+          'reorder_level': '0',
+          'unit_cost_per_base': '0',
+        });
+      }
+      final costPerBase = yieldBase > Decimal.zero
+          ? (mixtureCost / yieldBase).toDecimal(scaleOnInfinitePrecision: 6)
+          : Decimal.zero;
+      await adjustStock(inventoryId: mixId, delta: moneyString(yieldBase), reason: 'Mixture produced');
       await ref.set({
-        'id': mixId,
-        'branch_id': branchId,
-        'ingredient_id': mixtureId,
-        'ingredient_name': mixtureId,
-        'quantity_base': '0',
-        'unit': StockUnits.normalize(yieldUnit),
+        'unit_cost_per_base': moneyString(costPerBase),
         'kind': 'MIXTURE',
-        'reorder_level': '0',
-      });
+        'last_produced_at': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      await db.collection('businesses').doc(businessId).collection('ingredients').doc(mixtureId).set({
+        'unit_cost_per_base': moneyString(costPerBase),
+        'kind': 'MIXTURE',
+      }, SetOptions(merge: true));
+
+      await saveNamed(
+        collection: 'productions',
+        name: mixtureId,
+        extra: {
+          'mixture_id': mixtureId,
+          'yield_quantity_base': moneyString(yieldBase),
+          'unit': StockUnits.baseOf(yieldUnit),
+          'branch_id': branchId,
+          'created_by': _tenant.userId,
+          'total_component_cost': moneyString(mixtureCost),
+          'unit_cost_per_base': moneyString(costPerBase),
+          'components': [
+            for (final line in lines)
+              {
+                'ingredient_id': line.ingredientId.trim().toUpperCase(),
+                'quantity_base': moneyString(StockUnits.toBase(line.quantity, line.unit)),
+                'unit': StockUnits.normalize(line.unit),
+              },
+          ],
+        },
+      );
+    } catch (error) {
+      if (error is Failure) rethrow;
+      throw mapFirebaseFailure(error);
     }
-    await adjustStock(inventoryId: mixId, delta: moneyString(yieldBase), reason: 'Mixture produced');
-    await saveNamed(
-      collection: 'productions',
-      name: mixtureId,
-      extra: {
-        'mixture_id': mixtureId,
-        'yield_quantity_base': moneyString(yieldBase),
-        'unit': StockUnits.baseOf(yieldUnit),
-        'branch_id': branchId,
-        'created_by': _tenant.userId,
-        'components': [
-          for (final line in components)
-            {'ingredient_id': line.ingredientId, 'quantity_base': moneyString(StockUnits.toBase(line.quantity, line.unit))},
-        ],
-      },
-    );
   }
 
   Future<int> applyBulkPrice({

@@ -12,8 +12,10 @@ import '../../../../core/storage/hive_boxes.dart';
 import '../../../../core/utils/json_read.dart';
 import '../../../../core/utils/stock_units.dart';
 import '../../../../core/utils/order_totals.dart';
+import '../../../admin/data/admin_repository.dart';
 import '../../../pos/presentation/bloc/cart_cubit.dart';
 import '../../../auth/domain/permissions.dart';
+import '../../../shifts/data/shift_repository.dart';
 
 class PendingOrder {
   PendingOrder({
@@ -46,11 +48,13 @@ class PendingOrder {
 }
 
 class OrderRepository {
-  OrderRepository(this._firestore, this._tenant, this._pending);
+  OrderRepository(this._firestore, this._tenant, this._pending, [this._shifts, this._admin]);
 
   final FirestoreHost _firestore;
   final TenantContext _tenant;
   final Box<dynamic> _pending;
+  final ShiftRepository? _shifts;
+  final AdminRepository? _admin;
 
   Map<String, dynamic> buildPayload({
     required String branchId,
@@ -130,6 +134,7 @@ class OrderRepository {
       final productsById = _indexProducts(productsSnap.docs);
 
       final itemsPreview = (payload['items'] as List<dynamic>).map(asStringKeyMap).toList();
+      final setupWarnings = <String>[];
       if (_itemsRequireStock(itemsPreview, productsById) &&
           _collectStockNeeds(
             items: itemsPreview,
@@ -137,15 +142,17 @@ class OrderRepository {
             recipesByProduct: recipesByProduct,
             productsById: productsById,
           ).isEmpty) {
-        throw const Failure(
-          'These items need recipes or stock setup. Open Inventory → Recipes and link ingredients for each POS product.',
+        setupWarnings.add(
+          'Some items have no recipe/stock link. Order will still be recorded. Open Inventory → Recipes to link ingredients.',
         );
       }
+
+      final shiftMeta = await _resolveShiftMeta(branchId);
 
       // The Windows Firebase plugin crashes the app inside a transaction.
       // A normal batch write is the same sale without that native call.
       if (!kIsWeb && Platform.isWindows) {
-        return await _commitSaleWithoutTransaction(
+        final result = await _commitSaleWithoutTransaction(
           db: db,
           businessRef: businessRef,
           orderRef: orderRef,
@@ -158,7 +165,11 @@ class OrderRepository {
           idempotencyKey: idempotencyKey,
           recipesByProduct: recipesByProduct,
           productsById: productsById,
+          shiftMeta: shiftMeta,
         );
+        final warnings = [...setupWarnings, ...((result['stock_warnings'] as List?)?.map((e) => e.toString()) ?? const [])];
+        if (warnings.isNotEmpty) result['stock_warnings'] = warnings;
+        return result;
       }
 
       final result = await db.runTransaction((tx) async {
@@ -195,10 +206,7 @@ class OrderRepository {
           inventory: inventory,
           transactions: transactions,
           direction: _StockDirection.deduct,
-          onError: (message) {
-            localFailure = Failure(message);
-            throw localFailure!;
-          },
+          allowShortage: true,
         );
 
         final record = {
@@ -222,7 +230,9 @@ class OrderRepository {
           'created_by': userId,
           'created_at': FieldValue.serverTimestamp(),
           'idempotency_key': idempotencyKey,
-          'stock_deducted': stockNeeds.isNotEmpty && stockResult.complete,
+          'stock_deducted': stockNeeds.isNotEmpty,
+          if (stockResult.warnings.isNotEmpty) 'stock_warnings': stockResult.warnings,
+          if (shiftMeta != null) ...shiftMeta,
         };
         tx.set(orderRef, record, SetOptions(merge: false));
         tx.update(businessRef, {'orderSeq': seq});
@@ -236,8 +246,11 @@ class OrderRepository {
           'branch_id': branchId,
           'status': 'COMPLETED',
           'total': payload['total'],
+          if (stockResult.warnings.isNotEmpty) 'stock_warnings': stockResult.warnings,
         };
       });
+      final warnings = [...setupWarnings, ...((result['stock_warnings'] as List?)?.map((e) => e.toString()) ?? const [])];
+      if (warnings.isNotEmpty) result['stock_warnings'] = warnings;
       return result;
     } catch (error) {
       if (localFailure != null) {
@@ -247,6 +260,19 @@ class OrderRepository {
         rethrow;
       }
       throw mapFirebaseFailure(error);
+    }
+  }
+
+  Future<Map<String, dynamic>?> _resolveShiftMeta(String branchId) async {
+    try {
+      final shift = await _shifts?.getActiveShift(branchId: branchId);
+      if (shift == null) return null;
+      return {
+        'shift_id': shift.id,
+        'business_day': shift.businessDay,
+      };
+    } catch (_) {
+      return null;
     }
   }
 
@@ -263,6 +289,7 @@ class OrderRepository {
     required String idempotencyKey,
     required Map<String, Map<String, dynamic>> recipesByProduct,
     required Map<String, Map<String, dynamic>> productsById,
+    Map<String, dynamic>? shiftMeta,
   }) async {
     final existing = await orderRef.get();
     if (existing.exists) {
@@ -295,19 +322,34 @@ class OrderRepository {
     }
 
     final batch = db.batch();
+    final warnings = <String>[];
     for (final need in stockNeeds.values) {
       final stockSnap = stockSnaps[need.inventoryId];
+      Decimal current = Decimal.zero;
+      var name = need.label;
       if (stockSnap == null || !stockSnap.exists) {
-        throw Failure('Stock is missing for ${need.label}.');
+        warnings.add('${need.label}: no inventory record (available 0). Order punched; stock went negative.');
+        batch.set(inventory.doc(need.inventoryId), {
+          'id': need.inventoryId,
+          'branch_id': branchId,
+          'ingredient_id': need.ingredientId,
+          'ingredient_name': need.label,
+          'quantity_base': moneyString(Decimal.zero - need.quantity),
+          'unit': 'PCS',
+          'reorder_level': '0',
+        }, SetOptions(merge: true));
+      } else {
+        final stock = asStringKeyMap(stockSnap.data());
+        current = money(readString(stock, ['quantity_base', 'quantityBase'], '0'));
+        name = readString(stock, ['ingredient_name', 'ingredientName'], need.label);
+        final next = current - need.quantity;
+        if (next < Decimal.zero) {
+          warnings.add(
+            '$name: need ${moneyString(need.quantity)}, available ${moneyString(current)}. Order punched with shortage.',
+          );
+        }
+        batch.update(inventory.doc(need.inventoryId), {'quantity_base': moneyString(next)});
       }
-      final stock = asStringKeyMap(stockSnap.data());
-      final current = money(readString(stock, ['quantity_base', 'quantityBase'], '0'));
-      final next = current - need.quantity;
-      if (next < Decimal.zero) {
-        final name = readString(stock, ['ingredient_name', 'ingredientName'], need.label);
-        throw Failure('$name is below available stock.');
-      }
-      batch.update(inventory.doc(need.inventoryId), {'quantity_base': moneyString(next)});
       batch.set(
         transactions.doc(const Uuid().v4()),
         {
@@ -317,6 +359,7 @@ class OrderRepository {
           'type': 'SALE',
           'quantity_base': moneyString(need.quantity),
           'order_id': idempotencyKey,
+          if (current < need.quantity) 'shortage': true,
           'created_at': Timestamp.fromDate(DateTime.now().toUtc()),
         },
         SetOptions(merge: false),
@@ -347,6 +390,8 @@ class OrderRepository {
         'created_at': Timestamp.fromDate(DateTime.now().toUtc()),
         'idempotency_key': idempotencyKey,
         'stock_deducted': stockNeeds.isNotEmpty,
+        if (warnings.isNotEmpty) 'stock_warnings': warnings,
+        if (shiftMeta != null) ...shiftMeta,
       },
       SetOptions(merge: false),
     );
@@ -360,6 +405,7 @@ class OrderRepository {
       'branch_id': branchId,
       'status': 'COMPLETED',
       'total': payload['total'],
+      if (warnings.isNotEmpty) 'stock_warnings': warnings,
     };
   }
 
@@ -649,6 +695,328 @@ class OrderRepository {
       if (error is Failure) rethrow;
       throw mapFirebaseFailure(error);
     }
+  }
+
+  /// Cancels a completed (or open) order after verifying the Business Admin cancellation password.
+  /// [returnStock] and [refundMoney] are independent; either, both, or neither may be selected.
+  Future<Map<String, dynamic>> cancelOrderAuthorized({
+    required String orderId,
+    required String cancellationPassword,
+    required bool returnStock,
+    required bool refundMoney,
+    String? reason,
+    String refundMethod = 'CASH',
+  }) async {
+    if (!(_tenant.permissions.contains(PosPermissions.orderCancel) ||
+        _tenant.permissions.contains(PosPermissions.ordersRefund) ||
+        _tenant.permissions.contains(PosPermissions.orderRefund))) {
+      throw const Failure('You cannot cancel orders.');
+    }
+    final admin = _admin;
+    if (admin == null) {
+      throw const Failure('Cancellation password service is unavailable.');
+    }
+    await admin.verifyOrderCancellationPassword(cancellationPassword);
+
+    final businessId = _tenant.requireBusinessId();
+    final db = _firestore.requireDb();
+    final businessRef = db.collection('businesses').doc(businessId);
+    final orderRef = businessRef.collection('orders').doc(orderId);
+    final snap = await orderRef.get();
+    if (!snap.exists) throw const Failure('Order was not found.');
+    final order = asStringKeyMap(snap.data());
+    final branchId = readString(order, ['branch_id', 'branchId']);
+    if (!_tenant.matchesBranch(branchId)) {
+      throw const Failure('That order is not in your branch.');
+    }
+    final status = readString(order, ['status'], 'COMPLETED').toUpperCase();
+    if (status == 'CANCELLED' || status == 'REFUNDED') {
+      throw const Failure('This order is already closed.');
+    }
+
+    final recipesByProduct = _indexRecipes((await businessRef.collection('recipes').get()).docs);
+    final productsById = _indexProducts((await businessRef.collection('products').get()).docs);
+    final inventory = businessRef.collection('inventory');
+    final transactions = businessRef.collection('inventory_transactions');
+    final batch = db.batch();
+    final now = Timestamp.fromDate(DateTime.now().toUtc());
+
+    var stockReturned = false;
+    String? stockNote;
+    if (returnStock && readBool(order, ['stock_deducted']) && !readBool(order, ['stock_reversed'])) {
+      final needs = _collectStockNeeds(
+        items: readList(order, ['items']).map(asStringKeyMap).toList(),
+        branchId: branchId,
+        recipesByProduct: recipesByProduct,
+        productsById: productsById,
+      );
+      final skipped = <String>[];
+      for (final need in needs.values) {
+        final stockSnap = await inventory.doc(need.inventoryId).get();
+        if (!stockSnap.exists) {
+          skipped.add(need.label);
+          continue;
+        }
+        final stock = asStringKeyMap(stockSnap.data());
+        final next = money(readString(stock, ['quantity_base', 'quantityBase'], '0')) + need.quantity;
+        batch.update(inventory.doc(need.inventoryId), {'quantity_base': moneyString(next)});
+        batch.set(transactions.doc(const Uuid().v4()), {
+          'branch_id': branchId,
+          'inventory_id': need.inventoryId,
+          'ingredient_id': need.ingredientId,
+          'type': 'SALE_REVERSAL',
+          'quantity_base': moneyString(need.quantity),
+          'order_id': orderId,
+          'reason': 'Order cancelled',
+          'created_by': _tenant.userId,
+          'created_at': now,
+        });
+      }
+      stockReturned = skipped.isEmpty && needs.isNotEmpty;
+      if (skipped.isNotEmpty) stockNote = 'Stock not restored for: ${skipped.join(', ')}';
+      if (needs.isEmpty) stockNote = 'No recipe stock was linked to restore.';
+    }
+
+    var refundAmount = Decimal.zero;
+    final existingRefunds = _cloneRefundEntries(readList(order, ['refunds']).map(asStringKeyMap).toList());
+    if (refundMoney) {
+      final orderTotal = money(readString(order, ['total'], '0'));
+      final already = money(readString(order, ['refund_total'], '0'));
+      refundAmount = orderTotal - already;
+      if (refundAmount < Decimal.zero) refundAmount = Decimal.zero;
+      if (refundAmount > Decimal.zero) {
+        existingRefunds.add({
+          'id': const Uuid().v4(),
+          'amount': moneyString(refundAmount),
+          'method': refundMethod.toUpperCase(),
+          if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+          'restored_stock': false,
+          'from_cancellation': true,
+          'created_by': _tenant.userId,
+          'created_at': now,
+        });
+      }
+    }
+
+    final actions = <String>[
+      if (returnStock) 'return_stock',
+      if (refundMoney) 'refund_money',
+      if (!returnStock && !refundMoney) 'neither',
+    ];
+
+    batch.set(orderRef, {
+      'status': refundMoney && refundAmount > Decimal.zero ? 'REFUNDED' : 'CANCELLED',
+      'cancelled_at': now,
+      'cancelled_by': _tenant.userId,
+      'cancel_reason': reason?.trim(),
+      'cancel_actions': actions,
+      'cancel_stock_returned': stockReturned,
+      'cancel_money_refunded': refundMoney && refundAmount > Decimal.zero,
+      if (refundMoney && refundAmount > Decimal.zero) 'refund_total': moneyString(money(readString(order, ['refund_total'], '0')) + refundAmount),
+      if (refundMoney && refundAmount > Decimal.zero) 'refunds': existingRefunds,
+      if (stockReturned) 'stock_reversed': true,
+      if (stockNote != null) 'cancel_stock_note': stockNote,
+      'cancel_audit': {
+        'by': _tenant.userId,
+        'at': now,
+        'reason': reason?.trim(),
+        'return_stock': returnStock,
+        'stock_returned': stockReturned,
+        'refund_money': refundMoney,
+        'refund_amount': moneyString(refundAmount),
+        'actions': actions,
+      },
+      'updated_at': now,
+    }, SetOptions(merge: true));
+    await batch.commit();
+    return {
+      'id': orderId,
+      'status': refundMoney && refundAmount > Decimal.zero ? 'REFUNDED' : 'CANCELLED',
+      'stock_returned': stockReturned,
+      'money_refunded': refundMoney && refundAmount > Decimal.zero,
+      'refund_amount': moneyString(refundAmount),
+      if (stockNote != null) 'stock_note': stockNote,
+    };
+  }
+
+  /// Refunds / returns selected line items. Tracks per-line refunded and returned quantities.
+  Future<Map<String, dynamic>> refundOrderItems({
+    required String orderId,
+    required String cancellationPassword,
+    required List<Map<String, dynamic>> selections,
+    required String method,
+    String? reason,
+    bool refundMoney = true,
+    bool returnStock = false,
+  }) async {
+    if (!(_tenant.permissions.contains(PosPermissions.ordersRefund) ||
+        _tenant.permissions.contains(PosPermissions.orderRefund))) {
+      throw const Failure('You do not have permission to refund orders.');
+    }
+    final admin = _admin;
+    if (admin == null) {
+      throw const Failure('Cancellation password service is unavailable.');
+    }
+    await admin.verifyOrderCancellationPassword(cancellationPassword);
+    if (selections.isEmpty) {
+      throw const Failure('Select at least one item.');
+    }
+
+    final businessId = _tenant.requireBusinessId();
+    final db = _firestore.requireDb();
+    final businessRef = db.collection('businesses').doc(businessId);
+    final orderRef = businessRef.collection('orders').doc(orderId);
+    final snap = await orderRef.get();
+    if (!snap.exists) throw const Failure('Order was not found.');
+    final order = asStringKeyMap(snap.data());
+    final branchId = readString(order, ['branch_id', 'branchId']);
+    if (!_tenant.matchesBranch(branchId)) {
+      throw const Failure('That order is not in your branch.');
+    }
+    final status = readString(order, ['status'], 'COMPLETED').toUpperCase();
+    if (status != 'COMPLETED' && status != 'PARTIALLY_REFUNDED') {
+      throw Failure('Only completed sales can be item-refunded (status: $status).');
+    }
+
+    final items = readList(order, ['items']).map(asStringKeyMap).toList();
+    var refundAmount = Decimal.zero;
+    final affectedItems = <Map<String, dynamic>>[];
+    final stockItems = <Map<String, dynamic>>[];
+
+    for (final selection in selections) {
+      final index = selection['index'] is int ? selection['index'] as int : int.tryParse('${selection['index']}') ?? -1;
+      final qty = money('${selection['quantity'] ?? '0'}');
+      if (index < 0 || index >= items.length) {
+        throw const Failure('Invalid item selection.');
+      }
+      if (qty <= Decimal.zero) {
+        throw const Failure('Refund quantity must be greater than zero.');
+      }
+      final item = Map<String, dynamic>.from(items[index]);
+      final ordered = money(readString(item, ['quantity'], '1'));
+      final alreadyRefunded = money(readString(item, ['refunded_quantity', 'refundedQuantity'], '0'));
+      final remaining = ordered - alreadyRefunded;
+      if (qty > remaining) {
+        throw Failure(
+          '${readString(item, ['productName', 'product_name'], 'Item')}: only ${moneyString(remaining)} left to refund.',
+        );
+      }
+      final lineTotal = money(readString(item, ['lineTotal', 'line_total'], '0'));
+      final unitShare = ordered > Decimal.zero
+          ? (lineTotal / ordered).toDecimal(scaleOnInfinitePrecision: 4)
+          : Decimal.zero;
+      final itemRefund = unitShare * qty;
+      if (refundMoney) refundAmount += itemRefund;
+
+      item['refunded_quantity'] = moneyString(alreadyRefunded + qty);
+      if (returnStock) {
+        final alreadyReturned = money(readString(item, ['returned_quantity', 'returnedQuantity'], '0'));
+        final returnRemaining = ordered - alreadyReturned;
+        if (qty > returnRemaining) {
+          throw Failure(
+            '${readString(item, ['productName', 'product_name'], 'Item')}: only ${moneyString(returnRemaining)} left to return to stock.',
+          );
+        }
+        item['returned_quantity'] = moneyString(alreadyReturned + qty);
+        stockItems.add({
+          ...item,
+          'quantity': moneyString(qty),
+        });
+      }
+      items[index] = item;
+      affectedItems.add({
+        'index': index,
+        'product_id': readString(item, ['productId', 'product_id']),
+        'product_name': readString(item, ['productName', 'product_name']),
+        'quantity': moneyString(qty),
+        'amount': moneyString(itemRefund),
+        'return_stock': returnStock,
+      });
+    }
+
+    final recipesByProduct = _indexRecipes((await businessRef.collection('recipes').get()).docs);
+    final productsById = _indexProducts((await businessRef.collection('products').get()).docs);
+    final batch = db.batch();
+    final now = Timestamp.fromDate(DateTime.now().toUtc());
+    var stockRestored = false;
+    if (returnStock && stockItems.isNotEmpty) {
+      final needs = _collectStockNeeds(
+        items: stockItems,
+        branchId: branchId,
+        recipesByProduct: recipesByProduct,
+        productsById: productsById,
+      );
+      final inventory = businessRef.collection('inventory');
+      final transactions = businessRef.collection('inventory_transactions');
+      for (final need in needs.values) {
+        final stockSnap = await inventory.doc(need.inventoryId).get();
+        if (!stockSnap.exists) continue;
+        final stock = asStringKeyMap(stockSnap.data());
+        final next = money(readString(stock, ['quantity_base', 'quantityBase'], '0')) + need.quantity;
+        batch.update(inventory.doc(need.inventoryId), {'quantity_base': moneyString(next)});
+        batch.set(transactions.doc(const Uuid().v4()), {
+          'branch_id': branchId,
+          'inventory_id': need.inventoryId,
+          'ingredient_id': need.ingredientId,
+          'type': 'SALE_REVERSAL',
+          'quantity_base': moneyString(need.quantity),
+          'order_id': orderId,
+          'reason': 'Item return',
+          'created_by': _tenant.userId,
+          'created_at': now,
+        });
+        stockRestored = true;
+      }
+    }
+
+    final alreadyRefunded = money(readString(order, ['refund_total'], '0'));
+    final newRefundTotal = alreadyRefunded + (refundMoney ? refundAmount : Decimal.zero);
+    final orderTotal = money(readString(order, ['total'], '0'));
+    final isFull = newRefundTotal >= orderTotal;
+    final newStatus = (!refundMoney || refundAmount <= Decimal.zero)
+        ? status
+        : (isFull ? 'REFUNDED' : 'PARTIALLY_REFUNDED');
+
+    final refunds = _cloneRefundEntries(readList(order, ['refunds']).map(asStringKeyMap).toList());
+    final entry = {
+      'id': const Uuid().v4(),
+      'amount': moneyString(refundMoney ? refundAmount : Decimal.zero),
+      'method': method.toUpperCase(),
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+      'restored_stock': stockRestored,
+      'item_level': true,
+      'items': affectedItems,
+      'created_by': _tenant.userId,
+      'created_at': now,
+    };
+    refunds.add(entry);
+
+    batch.set(orderRef, {
+      'items': items,
+      'status': newStatus,
+      if (refundMoney && refundAmount > Decimal.zero) 'refund_total': moneyString(newRefundTotal),
+      'refunds': refunds,
+      'refunded_at': now,
+      'updated_at': now,
+      'item_refund_audit': FieldValue.arrayUnion([
+        {
+          'by': _tenant.userId,
+          'at': now.toDate().toIso8601String(),
+          'reason': reason?.trim(),
+          'refund_money': refundMoney,
+          'return_stock': returnStock,
+          'refund_amount': moneyString(refundMoney ? refundAmount : Decimal.zero),
+          'items': affectedItems,
+        },
+      ]),
+    }, SetOptions(merge: true));
+    await batch.commit();
+    return {
+      'id': orderId,
+      'status': newStatus,
+      'refund_total': moneyString(newRefundTotal),
+      'last_refund': entry,
+    };
   }
 
   Future<Map<String, dynamic>> refundOrder({
@@ -1001,6 +1369,7 @@ class OrderRepository {
     required _StockDirection direction,
     void Function(String message)? onError,
     bool allowMissing = false,
+    bool allowShortage = false,
   }) async {
     if (needs.isEmpty) {
       return const _StockApplyResult(complete: true, note: 'No recipe stock linked to this order.');
@@ -1012,9 +1381,33 @@ class OrderRepository {
     }
 
     final skipped = <String>[];
+    final warnings = <String>[];
     for (final need in needs.values) {
       final stockSnap = stockSnaps[need.inventoryId];
-        if (stockSnap == null || !stockSnap.exists) {
+      if (stockSnap == null || !stockSnap.exists) {
+        if (allowShortage && direction == _StockDirection.deduct) {
+          warnings.add('${need.label}: no inventory record (available 0). Order punched; stock went negative.');
+          tx.set(inventory.doc(need.inventoryId), {
+            'id': need.inventoryId,
+            'branch_id': branchId,
+            'ingredient_id': need.ingredientId,
+            'ingredient_name': need.label,
+            'quantity_base': moneyString(Decimal.zero - need.quantity),
+            'unit': 'PCS',
+            'reorder_level': '0',
+          }, SetOptions(merge: true));
+          tx.set(transactions.doc(const Uuid().v4()), {
+            'branch_id': branchId,
+            'inventory_id': need.inventoryId,
+            'ingredient_id': need.ingredientId,
+            'type': 'SALE',
+            'quantity_base': moneyString(need.quantity),
+            'order_id': orderId,
+            'shortage': true,
+            'created_at': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: false));
+          continue;
+        }
         if (allowMissing) {
           skipped.add(need.label);
           continue;
@@ -1030,7 +1423,7 @@ class OrderRepository {
       final stock = asStringKeyMap(stockSnap.data());
       final current = money(readString(stock, ['quantity_base', 'quantityBase'], '0'));
       final next = direction == _StockDirection.deduct ? current - need.quantity : current + need.quantity;
-      if (next < Decimal.zero) {
+      if (next < Decimal.zero && !(allowShortage && direction == _StockDirection.deduct)) {
         final name = readString(stock, ['ingredient_name', 'ingredientName'], need.label);
         final message = '$name is below available stock.';
         if (onError != null) {
@@ -1039,6 +1432,12 @@ class OrderRepository {
           throw Failure(message);
         }
         return const _StockApplyResult(complete: false);
+      }
+      if (next < Decimal.zero && allowShortage) {
+        final name = readString(stock, ['ingredient_name', 'ingredientName'], need.label);
+        warnings.add(
+          '$name: need ${moneyString(need.quantity)}, available ${moneyString(current)}. Order punched with shortage.',
+        );
       }
       tx.update(inventory.doc(need.inventoryId), {'quantity_base': moneyString(next)});
       tx.set(transactions.doc(const Uuid().v4()), {
@@ -1049,6 +1448,7 @@ class OrderRepository {
         'quantity_base': moneyString(need.quantity),
         'order_id': orderId,
         if (direction == _StockDirection.restore) 'reason': 'Refund',
+        if (next < Decimal.zero) 'shortage': true,
         'created_at': FieldValue.serverTimestamp(),
       }, SetOptions(merge: false));
     }
@@ -1057,9 +1457,10 @@ class OrderRepository {
       return _StockApplyResult(
         complete: false,
         note: 'Stock not restored for: ${skipped.join(', ')}',
+        warnings: warnings,
       );
     }
-    return const _StockApplyResult(complete: true);
+    return _StockApplyResult(complete: true, warnings: warnings);
   }
 
   Future<List<Map<String, dynamic>>> listOrders() async {
@@ -1130,9 +1531,10 @@ class _StockNeed {
 }
 
 class _StockApplyResult {
-  const _StockApplyResult({required this.complete, this.note});
+  const _StockApplyResult({required this.complete, this.note, this.warnings = const []});
   final bool complete;
   final String? note;
+  final List<String> warnings;
 }
 
 Box<dynamic> openPendingBox() => Hive.box(HiveBoxes.pendingOrders);
