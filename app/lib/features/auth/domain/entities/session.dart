@@ -89,6 +89,9 @@ class BusinessProfile extends Equatable {
     this.receiptShowAddress = true,
     this.receiptShowPhone = true,
     this.status = 'active',
+    this.requireOpenShift = false,
+    this.diningTablesEnabled = false,
+    this.diningTables = const [],
   });
 
   final String id;
@@ -106,9 +109,16 @@ class BusinessProfile extends Equatable {
   final bool receiptShowAddress;
   final bool receiptShowPhone;
   final String status;
+  /// When true, POS blocks payment until a shift is open.
+  final bool requireOpenShift;
+  /// When true, POS can show a table picker (list optional — free text still allowed).
+  final bool diningTablesEnabled;
+  /// Optional named/numbered tables. Empty = free-text / token only even if enabled.
+  final List<String> diningTables;
 
   bool get isActive => status == 'active' || status.isEmpty;
   bool get isSuspended => status == 'suspended';
+  bool get hasTableMap => diningTablesEnabled && diningTables.isNotEmpty;
 
   factory BusinessProfile.fromJson(Map<String, dynamic> json) {
     return BusinessProfile(
@@ -131,12 +141,37 @@ class BusinessProfile extends Equatable {
           ? true
           : readBool(json, ['receipt_show_phone', 'receiptShowPhone']),
       status: readString(json, ['status'], 'active'),
+      requireOpenShift: readBool(json, ['require_open_shift', 'requireOpenShift']),
+      diningTablesEnabled: readBool(json, ['dining_tables_enabled', 'diningTablesEnabled']),
+      diningTables: _tables(json),
     );
   }
 
   static int _paperWidth(Map<String, dynamic> json) {
     final value = readInt(json, ['receipt_paper_width', 'receiptPaperWidthMm', 'receipt_paper_width_mm'], 80);
     return value <= 58 ? 58 : 80;
+  }
+
+  static List<String> _tables(Map<String, dynamic> json) {
+    final raw = pick(json, ['dining_tables', 'diningTables']);
+    if (raw is List) {
+      return [
+        for (final item in raw)
+          if ('$item'.trim().isNotEmpty) '$item'.trim(),
+      ];
+    }
+    if (raw is String && raw.trim().isNotEmpty) {
+      return parseDiningTableLabels(raw);
+    }
+    return const [];
+  }
+
+  static List<String> parseDiningTableLabels(String raw) {
+    return raw
+        .split(RegExp(r'[\n,;]+'))
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .toList();
   }
 
   @override
@@ -151,6 +186,9 @@ class BusinessProfile extends Equatable {
         receiptPaperWidthMm,
         receiptShowAddress,
         receiptShowPhone,
+        requireOpenShift,
+        diningTablesEnabled,
+        diningTables,
       ];
 }
 
@@ -250,6 +288,9 @@ class Session extends Equatable {
             'receipt_show_address': business!.receiptShowAddress,
             'receipt_show_phone': business!.receiptShowPhone,
             'status': business!.status,
+            'require_open_shift': business!.requireOpenShift,
+            'dining_tables_enabled': business!.diningTablesEnabled,
+            'dining_tables': business!.diningTables,
           },
         if (branch != null)
           'branch': {

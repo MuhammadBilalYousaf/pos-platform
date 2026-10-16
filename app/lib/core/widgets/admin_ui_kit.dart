@@ -64,17 +64,20 @@ class AdminSurfaceCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
+    // Material (not DecoratedBox alone) so ListTile ink/splash paint correctly.
+    return Material(
+      color: Colors.white,
+      elevation: 0,
+      shadowColor: Colors.black.withValues(alpha: 0.03),
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kAdminBorder),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 4)),
-        ],
+        side: const BorderSide(color: kAdminBorder),
       ),
-      padding: padding,
-      child: child,
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: padding,
+        child: child,
+      ),
     );
   }
 }

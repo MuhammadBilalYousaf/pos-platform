@@ -65,6 +65,7 @@ class ProductVariant extends Equatable {
     required this.price,
     required this.isDefault,
     this.recipeMultiplier = '1',
+    this.sku,
   });
 
   final String id;
@@ -74,20 +75,24 @@ class ProductVariant extends Equatable {
 
   /// How many times the base recipe is consumed when this size is sold.
   final String recipeMultiplier;
+  final String? sku;
 
   factory ProductVariant.fromJson(Map<String, dynamic> json) {
+    final sku = readString(json, ['sku']);
     return ProductVariant(
       id: readString(json, ['id']),
       name: readString(json, ['name']),
       price: readString(json, ['price'], '0'),
       isDefault: readBool(json, ['is_default', 'isDefault']),
       recipeMultiplier: readString(json, ['recipe_multiplier', 'recipeMultiplier'], '1'),
+      sku: sku.isEmpty ? null : sku,
     );
   }
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
+        if (sku != null) 'sku': sku,
         'price': price,
         'is_default': isDefault,
         'recipe_multiplier': recipeMultiplier,
@@ -106,6 +111,7 @@ class CatalogProduct extends Equatable {
     required this.variants,
     required this.options,
     this.sku,
+    this.imageUrl,
     this.active = true,
   });
 
@@ -114,6 +120,8 @@ class CatalogProduct extends Equatable {
   final String name;
   final String productType;
   final String? sku;
+  /// Optional product picture URL (uploaded file or pasted link).
+  final String? imageUrl;
   final bool active;
   final List<ProductVariant> variants;
   final List<ProductOption> options;
@@ -123,12 +131,14 @@ class CatalogProduct extends Equatable {
       : variants.firstWhere((item) => item.isDefault, orElse: () => variants.first);
 
   factory CatalogProduct.fromJson(Map<String, dynamic> json) {
+    final image = readString(json, ['image_url', 'imageUrl', 'photo_url', 'photoUrl']);
     return CatalogProduct(
       id: readString(json, ['id']),
       categoryId: readString(json, ['category_id', 'categoryId']),
       name: readString(json, ['name']),
       productType: readString(json, ['product_type', 'productType'], 'SIMPLE'),
       sku: pick(json, ['sku'])?.toString(),
+      imageUrl: image.isEmpty ? null : image,
       active: json.containsKey('active') ? readBool(json, ['active']) : true,
       variants: readList(json, ['variants'])
           .map((item) => ProductVariant.fromJson(asStringKeyMap(item)))
@@ -145,6 +155,7 @@ class CatalogProduct extends Equatable {
         'name': name,
         'product_type': productType,
         'sku': sku,
+        'image_url': imageUrl,
         'active': active,
         'variants': variants.map((item) => item.toJson()).toList(),
         'options': options.map((item) => item.toJson()).toList(),

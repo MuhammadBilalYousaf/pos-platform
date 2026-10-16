@@ -42,8 +42,8 @@ class StockStatus {
     required String quantity,
     required String reorderLevel,
   }) {
-    final qty = money(quantity.isEmpty ? '0' : quantity);
-    final reorder = money(reorderLevel.isEmpty ? '0' : reorderLevel);
+    final qty = moneyOrZero(quantity);
+    final reorder = moneyOrZero(reorderLevel);
     if (qty <= Decimal.zero) {
       return StockStatus(level: StockLevel.out, quantity: qty, reorderLevel: reorder);
     }

@@ -6,47 +6,50 @@ import 'package:win32/win32.dart';
 
 class WindowsRawPrinter {
   List<String> listPrinters() {
-    final needed = calloc<DWORD>();
-    final returned = calloc<DWORD>();
     try {
-      EnumPrinters(PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS, nullptr, 4, nullptr, 0, needed, returned);
-      if (needed.value == 0) return const [];
-      final buffer = calloc<Uint8>(needed.value);
+      final needed = calloc<DWORD>();
+      final returned = calloc<DWORD>();
       try {
-        final ok = EnumPrinters(
-          PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS,
-          nullptr,
-          4,
-          buffer,
-          needed.value,
-          needed,
-          returned,
-        );
-        if (ok == 0) {
-          throw StateError('Could not list printers (${GetLastError()})');
-        }
-        final names = <String>[];
-        final count = returned.value;
-        for (var i = 0; i < count; i++) {
-          final info = (buffer.cast<PRINTER_INFO_4>() + i).ref;
-          if (info.pPrinterName == nullptr) continue;
-          final name = info.pPrinterName.toDartString();
-          if (name.isNotEmpty) names.add(name);
-        }
-        names.sort();
-        final ports = listComPorts();
-        for (final port in ports) {
-          if (!names.any((name) => name.toUpperCase() == port.toUpperCase())) {
-            names.add(port);
+        EnumPrinters(PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS, nullptr, 4, nullptr, 0, needed, returned);
+        if (needed.value == 0) return listComPorts();
+        final buffer = calloc<Uint8>(needed.value);
+        try {
+          final ok = EnumPrinters(
+            PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS,
+            nullptr,
+            4,
+            buffer,
+            needed.value,
+            needed,
+            returned,
+          );
+          if (ok == 0) return listComPorts();
+          final names = <String>[];
+          final count = returned.value;
+          for (var i = 0; i < count; i++) {
+            final info = (buffer.cast<PRINTER_INFO_4>() + i).ref;
+            if (info.pPrinterName == nullptr) continue;
+            final name = info.pPrinterName.toDartString();
+            if (name.isNotEmpty) names.add(name);
           }
+          names.sort();
+          final ports = listComPorts();
+          for (final port in ports) {
+            if (!names.any((name) => name.toUpperCase() == port.toUpperCase())) {
+              names.add(port);
+            }
+          }
+          return names;
+        } finally {
+          calloc.free(buffer);
         }
-        return names;
       } finally {
-        calloc.free(buffer);
+        calloc.free(needed);
+        calloc.free(returned);
       }
-    } finally {
-      calloc.free(needed);
-      calloc.free(returned);
+    } catch (_) {
+      // Never crash the app from printer discovery (common in release).
+      return listComPorts();
     }
   }
 
@@ -100,20 +103,24 @@ class WindowsRawPrinter {
   }
 
   String? defaultPrinter() {
-    final size = calloc<DWORD>();
     try {
-      GetDefaultPrinter(Pointer<Utf16>.fromAddress(0), size);
-      if (size.value == 0) return null;
-      final buffer = calloc<Uint16>(size.value);
+      final size = calloc<DWORD>();
       try {
-        if (GetDefaultPrinter(buffer.cast<Utf16>(), size) == 0) return null;
-        final name = buffer.cast<Utf16>().toDartString().trim();
-        return name.isEmpty ? null : name;
+        GetDefaultPrinter(Pointer<Utf16>.fromAddress(0), size);
+        if (size.value == 0) return null;
+        final buffer = calloc<Uint16>(size.value);
+        try {
+          if (GetDefaultPrinter(buffer.cast<Utf16>(), size) == 0) return null;
+          final name = buffer.cast<Utf16>().toDartString().trim();
+          return name.isEmpty ? null : name;
+        } finally {
+          calloc.free(buffer);
+        }
       } finally {
-        calloc.free(buffer);
+        calloc.free(size);
       }
-    } finally {
-      calloc.free(size);
+    } catch (_) {
+      return null;
     }
   }
 

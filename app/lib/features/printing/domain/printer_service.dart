@@ -3,18 +3,44 @@ import 'dart:typed_data';
 import '../data/printer_settings_store.dart';
 import '../data/raw_printer.dart';
 
+/// Customer (priced) vs kitchen (items only) ticket layout.
+enum ReceiptKind { customer, kitchen }
+
+/// What to send to the printer after a sale.
+enum ReceiptPrintMode {
+  both,
+  kitchenOnly,
+  customerOnly,
+  none,
+}
+
+extension ReceiptPrintModeX on ReceiptPrintMode {
+  String get label => switch (this) {
+        ReceiptPrintMode.both => 'Both (kitchen + customer)',
+        ReceiptPrintMode.kitchenOnly => 'Kitchen only',
+        ReceiptPrintMode.customerOnly => 'Customer only',
+        ReceiptPrintMode.none => 'No print',
+      };
+}
+
 class ReceiptLine {
   const ReceiptLine({
     required this.name,
     required this.quantity,
     required this.unitPrice,
     required this.lineTotal,
+    this.isReturned = false,
+    this.note,
   });
 
   final String name;
   final String quantity;
   final String unitPrice;
   final String lineTotal;
+  /// True when this line is a refunded / returned portion.
+  final bool isReturned;
+  /// e.g. RETURNED, REFUNDED
+  final String? note;
 }
 
 class ReceiptData {
@@ -42,6 +68,9 @@ class ReceiptData {
     this.tableNo,
     this.tendered,
     this.change,
+    this.refundTotal,
+    this.originalTotal,
+    this.kind = ReceiptKind.customer,
   });
 
   final String businessName;
@@ -67,13 +96,59 @@ class ReceiptData {
   final String? tableNo;
   final String? tendered;
   final String? change;
+  /// Amount already refunded (money). When set, receipt shows original vs net.
+  final String? refundTotal;
+  /// Original sale total before refunds.
+  final String? originalTotal;
+  final ReceiptKind kind;
+
+  bool get isKitchen => kind == ReceiptKind.kitchen;
 
   String get separator => '-' * columns;
 
   String get titleLine {
+    if (isKitchen) return 'KITCHEN';
     final value = header?.trim() ?? '';
     return value.isEmpty ? businessName : value;
   }
+
+  ReceiptData _withKind(ReceiptKind next) {
+    if (kind == next) return this;
+    return ReceiptData(
+      businessName: businessName,
+      branchName: branchName,
+      address: address,
+      phone: phone,
+      orderNumber: orderNumber,
+      cashierName: cashierName,
+      createdAt: createdAt,
+      lines: lines,
+      subtotal: subtotal,
+      discount: discount,
+      tax: tax,
+      total: total,
+      paymentMethod: paymentMethod,
+      footer: footer,
+      header: header,
+      paperWidthMm: paperWidthMm,
+      showAddress: showAddress,
+      showPhone: showPhone,
+      orderType: orderType,
+      customerName: customerName,
+      tableNo: tableNo,
+      tendered: tendered,
+      change: change,
+      refundTotal: refundTotal,
+      originalTotal: originalTotal,
+      kind: next,
+    );
+  }
+
+  /// Same order data laid out as a kitchen ticket (no prices).
+  ReceiptData asKitchen() => _withKind(ReceiptKind.kitchen);
+
+  /// Same order data laid out as a customer receipt (with prices).
+  ReceiptData asCustomer() => _withKind(ReceiptKind.customer);
 
   factory ReceiptData.sample({
     required String businessName,
@@ -115,6 +190,7 @@ class ReceiptData {
   }
 
   String toPreviewText() {
+    if (isKitchen) return _kitchenPreviewText();
     final buffer = StringBuffer();
     buffer.writeln(titleLine);
     if (branchName.isNotEmpty) buffer.writeln(branchName);
@@ -138,15 +214,31 @@ class ReceiptData {
       ..writeln('Paid: $paymentMethod')
       ..writeln(separator);
     for (final line in lines) {
-      buffer.writeln('${line.quantity} x ${line.name}');
-      buffer.writeln('  ${line.unitPrice}    ${line.lineTotal}');
+      if (line.isReturned) {
+        final tag = (line.note == null || line.note!.isEmpty) ? 'RETURNED' : line.note!;
+        buffer.writeln('X ${line.quantity} x ${line.name} [$tag]');
+        buffer.writeln('  ${line.unitPrice}    ${line.lineTotal}');
+      } else {
+        buffer.writeln('${line.quantity} x ${line.name}');
+        buffer.writeln('  ${line.unitPrice}    ${line.lineTotal}');
+      }
     }
     buffer
       ..writeln(separator)
       ..writeln(_moneyRow('Subtotal', subtotal))
       ..writeln(_moneyRow('Discount', discount))
-      ..writeln(_moneyRow('Tax', tax))
-      ..writeln(_moneyRow('TOTAL', total));
+      ..writeln(_moneyRow('Tax', tax));
+    final refunded = refundTotal?.trim() ?? '';
+    final original = originalTotal?.trim() ?? '';
+    if (refunded.isNotEmpty && refunded != '0' && refunded != '0.00') {
+      if (original.isNotEmpty) {
+        buffer.writeln(_moneyRow('Original', original));
+      }
+      buffer.writeln(_moneyRow('Refunded', '-$refunded'));
+      buffer.writeln(_moneyRow('NET TOTAL', total));
+    } else {
+      buffer.writeln(_moneyRow('TOTAL', total));
+    }
     if (tendered != null && tendered!.isNotEmpty) {
       buffer.writeln(_moneyRow('Tendered', tendered!));
     }
@@ -156,6 +248,30 @@ class ReceiptData {
     if (footer != null && footer!.isNotEmpty) {
       buffer.writeln(footer);
     }
+    return buffer.toString();
+  }
+
+  String _kitchenPreviewText() {
+    final buffer = StringBuffer()
+      ..writeln('*** KITCHEN ***')
+      ..writeln(separator)
+      ..writeln('Order: $orderNumber')
+      ..writeln('Date: ${createdAt.toLocal()}');
+    if (orderType != null && orderType!.isNotEmpty) {
+      buffer.writeln('Type: ${_label(orderType!)}');
+    }
+    if (tableNo != null && tableNo!.isNotEmpty) {
+      buffer.writeln('Table: $tableNo');
+    }
+    if (customerName != null && customerName!.isNotEmpty) {
+      buffer.writeln('Customer: $customerName');
+    }
+    buffer.writeln(separator);
+    for (final line in lines) {
+      if (line.isReturned) continue;
+      buffer.writeln('${line.quantity} x ${line.name}');
+    }
+    buffer.writeln(separator);
     return buffer.toString();
   }
 
@@ -179,6 +295,11 @@ class PrinterNotConfiguredException implements Exception {
 
 abstract class PrinterService {
   Future<void> printReceipt(ReceiptData receipt);
+
+  /// Prints one or more tickets. Each ticket ends with its own paper cut.
+  /// Kitchen is printed before customer when [mode] is [ReceiptPrintMode.both].
+  Future<void> printForMode(ReceiptData customerReceipt, ReceiptPrintMode mode);
+
   Future<List<String>> availablePrinters();
   String? scanWarning();
   String? get configuredPrinter;
@@ -186,7 +307,15 @@ abstract class PrinterService {
 }
 
 class EscPosEncoder {
+  /// Partial cut after feed — each ticket is its own cut job.
+  static const List<int> cutCommand = [0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x41, 0x10];
+
   Uint8List encode(ReceiptData receipt) {
+    if (receipt.isKitchen) return _encodeKitchen(receipt);
+    return _encodeCustomer(receipt);
+  }
+
+  Uint8List _encodeCustomer(ReceiptData receipt) {
     final bytes = <int>[
       0x1B, 0x40,
       0x1B, 0x74, 0x00,
@@ -225,15 +354,30 @@ class EscPosEncoder {
     line('Paid: ${receipt.paymentMethod}');
     line(receipt.separator);
     for (final item in receipt.lines) {
-      line(_fit('${item.quantity} x ${item.name}', receipt.columns));
+      if (item.isReturned) {
+        final tag = (item.note == null || item.note!.isEmpty) ? 'RETURNED' : item.note!;
+        line(_fit('X ${item.quantity} x ${item.name} [$tag]', receipt.columns));
+      } else {
+        line(_fit('${item.quantity} x ${item.name}', receipt.columns));
+      }
       line(receipt._moneyRow(item.unitPrice, item.lineTotal));
     }
     line(receipt.separator);
     line(receipt._moneyRow('Subtotal', receipt.subtotal));
     line(receipt._moneyRow('Discount', receipt.discount));
     line(receipt._moneyRow('Tax', receipt.tax));
+    final refunded = receipt.refundTotal?.trim() ?? '';
+    final original = receipt.originalTotal?.trim() ?? '';
     bytes.addAll([0x1B, 0x45, 0x01]);
-    line(receipt._moneyRow('TOTAL', receipt.total));
+    if (refunded.isNotEmpty && refunded != '0' && refunded != '0.00') {
+      bytes.addAll([0x1B, 0x45, 0x00]);
+      if (original.isNotEmpty) line(receipt._moneyRow('Original', original));
+      line(receipt._moneyRow('Refunded', '-$refunded'));
+      bytes.addAll([0x1B, 0x45, 0x01]);
+      line(receipt._moneyRow('NET TOTAL', receipt.total));
+    } else {
+      line(receipt._moneyRow('TOTAL', receipt.total));
+    }
     bytes.addAll([0x1B, 0x45, 0x00]);
     if (receipt.tendered != null && receipt.tendered!.isNotEmpty) {
       line(receipt._moneyRow('Tendered', receipt.tendered!));
@@ -248,7 +392,54 @@ class EscPosEncoder {
         if (part.trim().isNotEmpty) line(part.trim());
       }
     }
-    bytes.addAll([0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x41, 0x10]);
+    bytes.addAll(cutCommand);
+    return Uint8List.fromList(bytes);
+  }
+
+  Uint8List _encodeKitchen(ReceiptData receipt) {
+    final bytes = <int>[
+      0x1B, 0x40,
+      0x1B, 0x74, 0x00,
+      0x1B, 0x61, 0x01,
+      0x1B, 0x45, 0x01,
+      0x1D, 0x21, 0x11,
+    ];
+    void line(String text) {
+      bytes.addAll(_latin1(text));
+      bytes.add(0x0A);
+    }
+
+    line('*** KITCHEN ***');
+    bytes.addAll([0x1D, 0x21, 0x00]);
+    line(receipt.separator);
+    bytes.addAll([0x1B, 0x61, 0x00, 0x1B, 0x45, 0x01]);
+    line('Order: ${receipt.orderNumber}');
+    bytes.addAll([0x1B, 0x45, 0x00]);
+    line('Date: ${_stamp(receipt.createdAt)}');
+    if (receipt.orderType != null && receipt.orderType!.isNotEmpty) {
+      bytes.addAll([0x1B, 0x45, 0x01]);
+      line('Type: ${receipt.orderType!.replaceAll('_', ' ')}');
+      bytes.addAll([0x1B, 0x45, 0x00]);
+    }
+    if (receipt.tableNo != null && receipt.tableNo!.isNotEmpty) {
+      bytes.addAll([0x1B, 0x45, 0x01, 0x1D, 0x21, 0x01]);
+      line('Table: ${receipt.tableNo}');
+      bytes.addAll([0x1D, 0x21, 0x00, 0x1B, 0x45, 0x00]);
+    }
+    if (receipt.customerName != null && receipt.customerName!.isNotEmpty) {
+      line('Customer: ${receipt.customerName}');
+    }
+    line(receipt.separator);
+    // Larger item lines for kitchen staff — no prices.
+    bytes.addAll([0x1D, 0x21, 0x01, 0x1B, 0x45, 0x01]);
+    for (final item in receipt.lines) {
+      if (item.isReturned) continue;
+      line(_fit('${item.quantity} x ${item.name}', receipt.columns));
+      bytes.add(0x0A);
+    }
+    bytes.addAll([0x1D, 0x21, 0x00, 0x1B, 0x45, 0x00]);
+    line(receipt.separator);
+    bytes.addAll(cutCommand);
     return Uint8List.fromList(bytes);
   }
 
@@ -337,8 +528,7 @@ class ThermalPrinterService implements PrinterService {
     return null;
   }
 
-  @override
-  Future<void> printReceipt(ReceiptData receipt) async {
+  String _requirePrinter() {
     final known = _cachedPrinters();
     var printer = _resolvePrinterName(_settings.selectedPrinter, known);
     if (printer != null && isVirtualPrinter(printer)) {
@@ -347,18 +537,47 @@ class ThermalPrinterService implements PrinterService {
     if (printer == null) {
       final preferred = known.where((name) => !isVirtualPrinter(name)).toList();
       printer = preferred.length == 1 ? preferred.first : null;
-      if (printer != null) await _settings.save(printer);
     }
     if (printer == null || printer.isEmpty) {
       final warning = _transport.pluggedInWithoutDriver();
       if (warning != null) throw StateError(warning);
       throw PrinterNotConfiguredException();
     }
+    return printer;
+  }
+
+  @override
+  Future<void> printReceipt(ReceiptData receipt) async {
+    final printer = _requirePrinter();
+    if (_settings.selectedPrinter == null) {
+      await _settings.save(printer);
+    }
     final bytes = _encoder.encode(receipt);
     if (bytes.isEmpty) {
       throw StateError('Receipt encoding produced no data.');
     }
     _transport.send(printer, bytes);
+  }
+
+  @override
+  Future<void> printForMode(ReceiptData customerReceipt, ReceiptPrintMode mode) async {
+    if (mode == ReceiptPrintMode.none) return;
+
+    final jobs = <ReceiptData>[];
+    // Kitchen first, then customer — each job ends with its own cut.
+    if (mode == ReceiptPrintMode.both || mode == ReceiptPrintMode.kitchenOnly) {
+      jobs.add(customerReceipt.asKitchen());
+    }
+    if (mode == ReceiptPrintMode.both || mode == ReceiptPrintMode.customerOnly) {
+      jobs.add(customerReceipt.asCustomer());
+    }
+
+    for (var i = 0; i < jobs.length; i++) {
+      await printReceipt(jobs[i]);
+      if (i < jobs.length - 1) {
+        await Future<void>.delayed(const Duration(milliseconds: 450));
+      }
+    }
   }
 }
 

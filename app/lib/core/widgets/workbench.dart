@@ -37,6 +37,12 @@ class _WorkbenchShellState extends State<WorkbenchShell> {
   @override
   Widget build(BuildContext context) {
     final destinations = widget.destinations;
+    if (destinations.isEmpty) {
+      return Scaffold(
+        appBar: AppBar(title: widget.title, actions: widget.actions),
+        body: const Center(child: Text('No destinations')),
+      );
+    }
     final safeIndex = _index.clamp(0, destinations.length - 1);
     final wide = MediaQuery.sizeOf(context).width >= 1000;
     return Scaffold(

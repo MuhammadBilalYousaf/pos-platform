@@ -6,6 +6,7 @@ import 'package:decimal/decimal.dart';
 import '../../../../core/errors/failures.dart';
 import '../../../../core/utils/json_read.dart';
 import '../../../../core/utils/order_totals.dart';
+import '../../../../core/utils/safe_async.dart';
 import '../../../../core/widgets/password_field.dart';
 import '../../../../core/widgets/workbench.dart';
 import '../../../../core/widgets/admin_ui_kit.dart';
@@ -205,11 +206,20 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
     );
   }
 
-  Future<void> _open(Map<String, dynamic> row) async {
+  Map<String, dynamic> _latestOrder(Map<String, dynamic> row) {
+    final id = readString(row, ['id']);
+    if (id.isEmpty) return row;
+    for (final item in _rows) {
+      if (readString(item, ['id']) == id) return item;
+    }
+    return row;
+  }
+
+  ReceiptData _receiptFor(Map<String, dynamic> row) {
     final auth = context.read<AuthBloc>().state;
     final business = auth is AuthAuthenticated ? auth.session.business : null;
     final branch = auth is AuthAuthenticated ? auth.session.branch : null;
-    final receipt = receiptFromOrder(
+    return receiptFromOrder(
       row,
       businessName: business?.name ?? 'POS',
       branchName: branch?.name ?? readString(row, ['branch_id']),
@@ -221,10 +231,16 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
       showAddress: business?.receiptShowAddress ?? true,
       showPhone: business?.receiptShowPhone ?? true,
     );
+  }
+
+  Future<void> _open(Map<String, dynamic> row) async {
+    final latest = _latestOrder(row);
+    final auth = context.read<AuthBloc>().state;
+    final receipt = _receiptFor(latest);
     if (!mounted) return;
     await showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: Text(receipt.orderNumber),
         content: SizedBox(
           width: 400,
@@ -232,30 +248,22 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (row['cancel_audit'] is Map) ...[
+                if (latest['cancel_audit'] is Map) ...[
                   Text(
-                    'Cancelled by ${readString(asStringKeyMap(row['cancel_audit']), ['by'])}'
-                    ' · stock ${readBool(asStringKeyMap(row['cancel_audit']), ['stock_returned']) ? 'returned' : 'not returned'}'
-                    ' · refund ${readBool(asStringKeyMap(row['cancel_audit']), ['refund_money']) ? readString(asStringKeyMap(row['cancel_audit']), ['refund_amount']) : 'none'}',
+                    'Cancelled by ${readString(asStringKeyMap(latest['cancel_audit']), ['by'])}'
+                    ' · stock ${readBool(asStringKeyMap(latest['cancel_audit']), ['stock_returned']) ? 'returned' : 'not returned'}'
+                    ' · refund ${readBool(asStringKeyMap(latest['cancel_audit']), ['refund_money']) ? readString(asStringKeyMap(latest['cancel_audit']), ['refund_amount']) : 'none'}',
                     style: const TextStyle(fontSize: 12, color: Color(0xFFB91C1C)),
                   ),
                   const SizedBox(height: 8),
                 ],
-                for (final raw in readList(row, ['items']))
-                  Builder(
-                    builder: (context) {
-                      final item = asStringKeyMap(raw);
-                      final refunded = readString(item, ['refunded_quantity', 'refundedQuantity']);
-                      final returned = readString(item, ['returned_quantity', 'returnedQuantity']);
-                      if (refunded.isEmpty && returned.isEmpty) return const SizedBox.shrink();
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Text(
-                          '${readString(item, ['productName', 'product_name'])}: refunded $refunded · returned $returned',
-                          style: const TextStyle(fontSize: 12, color: Color(0xFFB45309)),
-                        ),
-                      );
-                    },
+                if (moneyOrZero(readString(latest, ['refund_total'], '0')) > Decimal.zero)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      'Refunded so far: Rs. ${readString(latest, ['refund_total'])} · Status: ${readString(latest, ['status'])}',
+                      style: const TextStyle(fontSize: 12, color: Color(0xFFB45309), fontWeight: FontWeight.w600),
+                    ),
                   ),
                 SelectableText(receipt.toPreviewText(), style: const TextStyle(fontFamily: 'Consolas')),
               ],
@@ -266,41 +274,41 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
           if (auth is AuthAuthenticated &&
               (auth.session.user.can(PosPermissions.ordersRefund) ||
                   auth.session.user.can(PosPermissions.orderRefund)) &&
-              _canRefund(readString(row, ['status'], 'COMPLETED')) &&
-              _refundRemaining(row) > Decimal.zero)
+              _canRefund(readString(latest, ['status'], 'COMPLETED')) &&
+              _refundRemaining(latest) > Decimal.zero)
             TextButton(
               onPressed: () {
-                Navigator.pop(context);
-                _runAfterDialogClosed(() => _refund(context, row));
+                Navigator.pop(dialogContext);
+                runAfterDialogClosed(this, () => _refund(latest));
               },
               child: const Text('Refund amount'),
             ),
           if (auth is AuthAuthenticated &&
               (auth.session.user.can(PosPermissions.ordersRefund) ||
                   auth.session.user.can(PosPermissions.orderRefund)) &&
-              _canRefund(readString(row, ['status'], 'COMPLETED')))
+              _canRefund(readString(latest, ['status'], 'COMPLETED')))
             TextButton(
               onPressed: () {
-                Navigator.pop(context);
-                _runAfterDialogClosed(() => _itemRefund(context, row));
+                Navigator.pop(dialogContext);
+                runAfterDialogClosed(this, () => _itemRefund(latest));
               },
               child: const Text('Refund / return items'),
             ),
           if (auth is AuthAuthenticated &&
               (auth.session.user.can(PosPermissions.orderCancel) ||
                   auth.session.user.can(PosPermissions.ordersRefund)) &&
-              _canCancelAuthorized(readString(row, ['status'], 'COMPLETED')))
+              _canCancelAuthorized(readString(latest, ['status'], 'COMPLETED')))
             TextButton(
               onPressed: () {
-                Navigator.pop(context);
-                _runAfterDialogClosed(() => _cancelAuthorized(context, row));
+                Navigator.pop(dialogContext);
+                runAfterDialogClosed(this, () => _cancelAuthorized(latest));
               },
               child: const Text('Cancel order'),
             ),
           TextButton(
             onPressed: () {
               showDialog<void>(
-                context: context,
+                context: dialogContext,
                 builder: (context) => AlertDialog(
                   title: const Text('Cancel vs waste'),
                   content: const Text(
@@ -317,23 +325,54 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
           ),
           TextButton(
             onPressed: () async {
+              final choice = await showDialog<String>(
+                context: dialogContext,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('Reprint'),
+                  content: const Text(
+                    'Kitchen ticket has items only (no prices) and cuts separately.\n'
+                    'Customer receipt includes totals.',
+                  ),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                    TextButton(onPressed: () => Navigator.pop(ctx, 'kitchen'), child: const Text('Kitchen')),
+                    TextButton(onPressed: () => Navigator.pop(ctx, 'customer'), child: const Text('Customer')),
+                    FilledButton(onPressed: () => Navigator.pop(ctx, 'both'), child: const Text('Both')),
+                  ],
+                ),
+              );
+              if (choice == null || !mounted) return;
               try {
-                await context.read<OrderCubit>().reprint(receipt);
-                if (context.mounted) {
-                  Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Reprint sent to the printer.')),
-                  );
+                final fresh = _receiptFor(_latestOrder(latest));
+                final cubit = context.read<OrderCubit>();
+                if (choice == 'kitchen') {
+                  await cubit.reprintKitchen(fresh);
+                } else if (choice == 'customer') {
+                  await cubit.reprintCustomer(fresh);
+                } else {
+                  await cubit.reprintBoth(fresh);
                 }
+                if (!mounted) return;
+                if (dialogContext.mounted) Navigator.pop(dialogContext);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      choice == 'kitchen'
+                          ? 'Kitchen ticket sent.'
+                          : choice == 'customer'
+                              ? 'Customer receipt sent.'
+                              : 'Kitchen + customer receipts sent.',
+                    ),
+                  ),
+                );
               } catch (error) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
-                }
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
               }
             },
-            child: const Text('Reprint receipt'),
+            child: const Text('Reprint…'),
           ),
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Close')),
         ],
       ),
     );
@@ -349,17 +388,10 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
     return s != 'CANCELLED' && s != 'REFUNDED';
   }
 
-  void _runAfterDialogClosed(Future<void> Function() action) {
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted) return;
-      await action();
-    });
-  }
-
   Future<String?> _askCancellationPassword() async {
     final password = TextEditingController();
     try {
-      final ok = await showDialog<bool>(
+      final ok = await showSafeDialog<bool>(
         context: context,
         useRootNavigator: true,
         barrierDismissible: false,
@@ -407,13 +439,13 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
     }
   }
 
-  Future<void> _cancelAuthorized(BuildContext context, Map<String, dynamic> row) async {
+  Future<void> _cancelAuthorized(Map<String, dynamic> row) async {
     final password = await _askCancellationPassword();
     if (password == null || !mounted) return;
 
     final reason = TextEditingController();
     try {
-      final choice = await showDialog<_CancelChoice>(
+      final choice = await showSafeDialog<_CancelChoice>(
         context: context,
         useRootNavigator: true,
         barrierDismissible: false,
@@ -491,7 +523,7 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
       );
       if (choice == null || !mounted) return;
 
-      final confirmed = await showDialog<bool>(
+      final confirmed = await showSafeDialog<bool>(
         context: context,
         useRootNavigator: true,
         barrierDismissible: false,
@@ -543,21 +575,22 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
     }
   }
 
-  Future<void> _itemRefund(BuildContext context, Map<String, dynamic> row) async {
+  Future<void> _itemRefund(Map<String, dynamic> row) async {
     final password = await _askCancellationPassword();
     if (password == null || !mounted) return;
 
     final items = readList(row, ['items']).map(asStringKeyMap).toList();
     final selectedQty = <int, TextEditingController>{};
     for (var i = 0; i < items.length; i++) {
-      final ordered = money(readString(items[i], ['quantity'], '1'));
-      final refunded = money(readString(items[i], ['refunded_quantity', 'refundedQuantity'], '0'));
+      final ordered = moneyOrZero(readString(items[i], ['quantity'], '1'));
+      final refunded = moneyOrZero(readString(items[i], ['refunded_quantity', 'refundedQuantity'], '0'));
       final remaining = ordered - refunded;
       if (remaining > Decimal.zero) {
         selectedQty[i] = TextEditingController(text: '0');
       }
     }
     if (selectedQty.isEmpty) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No items left to refund or return.')));
       return;
     }
@@ -568,7 +601,7 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
     var method = 'CASH';
     const methods = ['CASH', 'CARD', 'BANK_TRANSFER', 'EASYPAISA', 'JAZZCASH', 'OTHER'];
 
-    final ok = await showDialog<bool>(
+    final ok = await showSafeDialog<bool>(
       context: context,
       builder: (context) {
         return StatefulBuilder(
@@ -585,9 +618,9 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
                         Builder(
                           builder: (context) {
                             final item = items[entry.key];
-                            final ordered = money(readString(item, ['quantity'], '1'));
-                            final refunded = money(readString(item, ['refunded_quantity', 'refundedQuantity'], '0'));
-                            final returned = money(readString(item, ['returned_quantity', 'returnedQuantity'], '0'));
+                            final ordered = moneyOrZero(readString(item, ['quantity'], '1'));
+                            final refunded = moneyOrZero(readString(item, ['refunded_quantity', 'refundedQuantity'], '0'));
+                            final returned = moneyOrZero(readString(item, ['returned_quantity', 'returnedQuantity'], '0'));
                             final remaining = ordered - refunded;
                             return Padding(
                               padding: const EdgeInsets.only(bottom: 10),
@@ -684,6 +717,9 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Item action recorded. Status: ${result['status']}.')),
       );
+      // Re-open order so the receipt shows RETURNED lines and net totals.
+      final updated = _latestOrder(row);
+      runAfterDialogClosed(this, () => _open(updated));
     } on Failure catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
@@ -700,9 +736,10 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
     return remaining < Decimal.zero ? Decimal.zero : remaining;
   }
 
-  Future<void> _refund(BuildContext context, Map<String, dynamic> row) async {
+  Future<void> _refund(Map<String, dynamic> row) async {
     final remaining = _refundRemaining(row);
     if (remaining <= Decimal.zero) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Nothing left to refund on this order.')));
       return;
     }
@@ -714,12 +751,12 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
         : readString(asStringKeyMap(readList(row, ['payments']).first), ['method'], 'CASH');
     var restoreStock = true;
 
-    final ok = await showDialog<bool>(
+    final ok = await showSafeDialog<bool>(
       context: context,
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setLocal) {
-            final parsed = money(amount.text.trim().isEmpty ? '0' : amount.text.trim());
+            final parsed = moneyOrZero(amount.text);
             final isFull = parsed >= remaining;
             return AlertDialog(
               title: Text('Refund ${readString(row, ['order_number'])}'),
@@ -730,7 +767,7 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Text('Order total: Rs. ${readString(row, ['total'])}'),
-                    if (money(readString(row, ['refund_total'], '0')) > Decimal.zero)
+                    if (moneyOrZero(readString(row, ['refund_total'], '0')) > Decimal.zero)
                       Text('Already refunded: Rs. ${readString(row, ['refund_total'])}'),
                     Text('Remaining: Rs. ${moneyString(remaining)}', style: const TextStyle(fontWeight: FontWeight.w700)),
                     const SizedBox(height: 12),
@@ -800,6 +837,8 @@ class _OrdersPageState extends State<OrdersPage> with SingleTickerProviderStateM
           content: Text(note.isEmpty ? 'Refund recorded.' : 'Refund recorded. $note'),
         ),
       );
+      final updated = _latestOrder(row);
+      runAfterDialogClosed(this, () => _open(updated));
     } on Failure catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
@@ -828,6 +867,76 @@ ReceiptData receiptFromOrder(
   DateTime at = DateTime.now();
   if (created is Timestamp) at = created.toDate();
   final payment = payments.isEmpty ? <String, dynamic>{} : payments.first;
+
+  final lines = <ReceiptLine>[];
+  var netGoods = Decimal.zero;
+  var refundedGoods = Decimal.zero;
+
+  for (final item in items) {
+    final name = readString(item, ['productName', 'product_name'], 'Item');
+    final unitPrice = readString(item, ['unitPrice', 'unit_price'], '0');
+    final ordered = moneyOrZero(readString(item, ['quantity'], '0'));
+    final refundedQty = moneyOrZero(readString(item, ['refunded_quantity', 'refundedQuantity'], '0'));
+    final returnedQty = moneyOrZero(readString(item, ['returned_quantity', 'returnedQuantity'], '0'));
+    final lineTotal = moneyOrZero(readString(item, ['lineTotal', 'line_total'], '0'));
+    if (ordered <= Decimal.zero) continue;
+
+    final unitShare = (lineTotal / ordered).toDecimal(scaleOnInfinitePrecision: 4);
+    var kept = ordered - refundedQty;
+    if (kept < Decimal.zero) kept = Decimal.zero;
+
+    if (kept > Decimal.zero) {
+      final keptTotal = unitShare * kept;
+      netGoods += keptTotal;
+      lines.add(
+        ReceiptLine(
+          name: name,
+          quantity: moneyString(kept),
+          unitPrice: unitPrice,
+          lineTotal: moneyString(keptTotal),
+        ),
+      );
+    }
+
+    if (refundedQty > Decimal.zero) {
+      final refundLine = unitShare * refundedQty;
+      refundedGoods += refundLine;
+      final stockReturned = returnedQty > Decimal.zero;
+      lines.add(
+        ReceiptLine(
+          name: name,
+          quantity: moneyString(refundedQty),
+          unitPrice: unitPrice,
+          lineTotal: '-${moneyString(refundLine)}',
+          isReturned: true,
+          note: stockReturned ? 'RETURNED' : 'REFUNDED',
+        ),
+      );
+    }
+  }
+
+  final originalTotal = moneyOrZero(readString(row, ['total'], '0'));
+  final refundMoney = moneyOrZero(readString(row, ['refund_total'], '0'));
+  // Prefer order refund_total when money was refunded; otherwise goods returned value.
+  final effectiveRefund = refundMoney > Decimal.zero ? refundMoney : refundedGoods;
+  var netTotal = originalTotal - effectiveRefund;
+  if (netTotal < Decimal.zero) netTotal = Decimal.zero;
+
+  // Net subtotal from kept lines; fall back to original - refunded goods.
+  final originalSubtotal = moneyOrZero(readString(row, ['subtotal'], '0'));
+  final netSubtotal = netGoods > Decimal.zero
+      ? netGoods
+      : (originalSubtotal - refundedGoods < Decimal.zero ? Decimal.zero : originalSubtotal - refundedGoods);
+
+  // Scale tax/discount with remaining goods when there was an item refund.
+  final scale = originalSubtotal > Decimal.zero
+      ? (netSubtotal / originalSubtotal).toDecimal(scaleOnInfinitePrecision: 6)
+      : Decimal.one;
+  final originalTax = moneyOrZero(readString(row, ['tax'], '0'));
+  final originalDiscount = moneyOrZero(readString(row, ['discount'], '0'));
+  final netTax = effectiveRefund > Decimal.zero ? (originalTax * scale) : originalTax;
+  final netDiscount = effectiveRefund > Decimal.zero ? (originalDiscount * scale) : originalDiscount;
+
   return ReceiptData(
     businessName: businessName,
     branchName: branchName,
@@ -841,24 +950,18 @@ ReceiptData receiptFromOrder(
     orderNumber: readString(row, ['order_number', 'orderNumber']),
     cashierName: readString(row, ['cashier_name', 'cashierName', 'created_by']),
     createdAt: at,
-    lines: [
-      for (final item in items)
-        ReceiptLine(
-          name: readString(item, ['productName', 'product_name']),
-          quantity: readString(item, ['quantity']),
-          unitPrice: readString(item, ['unitPrice', 'unit_price']),
-          lineTotal: readString(item, ['lineTotal', 'line_total']),
-        ),
-    ],
-    subtotal: readString(row, ['subtotal']),
-    discount: readString(row, ['discount']),
-    tax: readString(row, ['tax']),
-    total: readString(row, ['total']),
+    lines: lines,
+    subtotal: moneyString(effectiveRefund > Decimal.zero ? netSubtotal : originalSubtotal),
+    discount: moneyString(netDiscount),
+    tax: moneyString(netTax),
+    total: moneyString(effectiveRefund > Decimal.zero ? netTotal : originalTotal),
     paymentMethod: readString(payment, ['method'], '-'),
     orderType: readString(row, ['order_type', 'orderType']),
     customerName: readString(row, ['customer_name', 'customerName']),
     tableNo: readString(row, ['table_no', 'tableNo']),
     tendered: pick(payment, ['tendered'])?.toString(),
     change: pick(payment, ['change'])?.toString(),
+    refundTotal: effectiveRefund > Decimal.zero ? moneyString(effectiveRefund) : null,
+    originalTotal: effectiveRefund > Decimal.zero ? moneyString(originalTotal) : null,
   );
 }

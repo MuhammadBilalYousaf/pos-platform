@@ -10,6 +10,9 @@ Decimal money(String value) {
   return parsed;
 }
 
+/// Safe parse for UI display paths — never throws.
+Decimal moneyOrZero(String? value) => parseMoneyInput(value ?? '') ?? Decimal.zero;
+
 /// Parses currency/quantity text (`10`, `+10`, `-2.5`). Returns null if invalid.
 Decimal? parseMoneyInput(String raw) {
   var text = raw.trim().replaceAll(',', '');
@@ -34,6 +37,32 @@ Decimal parseMoneyInputOrThrow(String raw, {String label = 'Amount'}) {
 }
 
 String moneyString(Decimal value) => value.round(scale: 2).toStringAsFixed(2);
+
+/// Resolves a discount entered as rupees or percent against [baseAmount].
+/// Percent is of [baseAmount]; result is never negative and never above the base.
+Decimal resolveDiscount({
+  required Decimal baseAmount,
+  required String value,
+  required bool isPercent,
+}) {
+  final raw = moneyOrZero(value);
+  if (raw <= Decimal.zero || baseAmount <= Decimal.zero) return Decimal.zero;
+  Decimal amount;
+  if (isPercent) {
+    final capped = raw > Decimal.fromInt(100) ? Decimal.fromInt(100) : raw;
+    amount = (baseAmount * capped / Decimal.fromInt(100)).toDecimal(scaleOnInfinitePrecision: 4);
+  } else {
+    amount = raw;
+  }
+  if (amount > baseAmount) amount = baseAmount;
+  return amount.round(scale: 2);
+}
+
+String formatDiscountLabel({required String value, required bool isPercent}) {
+  final trimmed = value.trim().isEmpty ? '0' : value.trim();
+  if (isPercent) return '$trimmed%';
+  return 'Rs. $trimmed';
+}
 
 class OrderLineInput {
   const OrderLineInput({

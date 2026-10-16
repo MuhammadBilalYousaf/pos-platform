@@ -1,8 +1,12 @@
+import 'dart:io';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:get_it/get_it.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:uuid/uuid.dart';
+import '../../core/errors/failures.dart';
 import '../../core/firebase/firestore_host.dart';
 import '../../core/firebase/tenant_context.dart';
 import '../../core/storage/hive_boxes.dart';
@@ -31,18 +35,47 @@ import '../../features/shifts/data/shift_repository.dart';
 
 final sl = GetIt.instance;
 
+Future<void> _openHiveBox(String name) async {
+  try {
+    await Hive.openBox(name);
+  } catch (error) {
+    final text = error.toString().toLowerCase();
+    if (text.contains('lock failed') ||
+        text.contains('errno = 33') ||
+        text.contains('another process has locked')) {
+      throw const Failure(
+        'POS is already open in another window. Close the other copy, then start again.',
+      );
+    }
+    rethrow;
+  }
+}
+
 Future<void> configureDependencies() async {
-  await Hive.initFlutter();
-  await Hive.openBox(HiveBoxes.catalog);
-  await Hive.openBox(HiveBoxes.cart);
-  await Hive.openBox(HiveBoxes.pendingOrders);
-  await Hive.openBox(HiveBoxes.session);
-  await Hive.openBox(HiveBoxes.heldTickets);
+  if (!kIsWeb && Platform.isWindows) {
+    final local = Platform.environment['LOCALAPPDATA'];
+    final path = (local != null && local.isNotEmpty)
+        ? '$local\\POS Platform\\hive'
+        : '${Directory.systemTemp.path}\\POS Platform\\hive';
+    await Directory(path).create(recursive: true);
+    Hive.init(path);
+  } else {
+    await Hive.initFlutter();
+  }
+  await _openHiveBox(HiveBoxes.catalog);
+  await _openHiveBox(HiveBoxes.cart);
+  await _openHiveBox(HiveBoxes.pendingOrders);
+  await _openHiveBox(HiveBoxes.session);
+  await _openHiveBox(HiveBoxes.heldTickets);
 
   sl.registerLazySingleton<SecureStore>(SecureStore.new);
-  final deviceId = await sl<SecureStore>().readDeviceId();
-  if (deviceId == null) {
-    await sl<SecureStore>().writeDeviceId(const Uuid().v4());
+  try {
+    final deviceId = await sl<SecureStore>().readDeviceId();
+    if (deviceId == null) {
+      await sl<SecureStore>().writeDeviceId(const Uuid().v4());
+    }
+  } catch (_) {
+    // Device id is optional; never block app start in release.
   }
 
   sl.registerLazySingleton<TenantContext>(TenantContext.new);

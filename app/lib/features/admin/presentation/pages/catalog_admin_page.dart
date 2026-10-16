@@ -1,10 +1,14 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+
 import '../../../../config/dependency_injection/injection.dart';
-import '../../../../core/widgets/workbench.dart';
+import '../../../../core/errors/failures.dart';
 import '../../../../core/widgets/admin_ui_kit.dart';
+import '../../../../core/widgets/product_image.dart';
+import '../../../../core/widgets/workbench.dart';
 import '../../../products/domain/entities/catalog.dart';
 import '../../../products/presentation/bloc/catalog_cubit.dart';
-import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../data/admin_repository.dart';
 
 class CatalogAdminPage extends StatelessWidget {
@@ -74,15 +78,7 @@ class CatalogAdminPage extends StatelessWidget {
                                 flex: 2,
                                 child: Row(
                                   children: [
-                                    Container(
-                                      width: 36,
-                                      height: 36,
-                                      decoration: BoxDecoration(
-                                        color: kAdminAccentSoft,
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: const Icon(Icons.icecream_outlined, color: kAdminAccent, size: 18),
-                                    ),
+                                    ProductImage(imageUrl: product.imageUrl, size: 36, iconSize: 18),
                                     const SizedBox(width: 10),
                                     Expanded(
                                       child: Text(product.name, style: const TextStyle(fontWeight: FontWeight.w600)),
@@ -303,11 +299,14 @@ class _ProductEditorDialog extends StatefulWidget {
 class _ProductEditorDialogState extends State<_ProductEditorDialog> {
   late final TextEditingController _name;
   late final TextEditingController _sku;
+  late final TextEditingController _imageUrl;
   late String _categoryId;
   late String _type;
   late bool _active;
   late List<_DraftRow> _variants;
   late List<_DraftRow> _options;
+  String? _pickedImagePath;
+  bool _saving = false;
 
   @override
   void initState() {
@@ -315,6 +314,7 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
     final product = widget.product;
     _name = TextEditingController(text: product?.name ?? '');
     _sku = TextEditingController(text: product?.sku ?? '');
+    _imageUrl = TextEditingController(text: product?.imageUrl ?? '');
     _categoryId = product?.categoryId ?? widget.catalog.categories.first.id;
     _type = product?.productType ?? 'SIMPLE';
     _active = product?.active ?? true;
@@ -346,12 +346,112 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
   void dispose() {
     _name.dispose();
     _sku.dispose();
+    _imageUrl.dispose();
     for (final row in [..._variants, ..._options]) {
       row.name.dispose();
       row.price.dispose();
       row.multiplier.dispose();
     }
     super.dispose();
+  }
+
+  Future<void> _pickImage() async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.image,
+      allowMultiple: false,
+      withData: false,
+      lockParentWindow: true,
+    );
+    final files = result?.files ?? const [];
+    final path = files.isEmpty ? null : files.first.path;
+    if (path == null || path.isEmpty) return;
+    setState(() => _pickedImagePath = path);
+  }
+
+  Future<void> _save() async {
+    if (_saving) return;
+    final name = _name.text.trim();
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a product name.')));
+      return;
+    }
+    setState(() => _saving = true);
+    try {
+      final admin = sl<AdminRepository>();
+      final sku = _sku.text.trim();
+      final productId = admin.resolveProductId(id: widget.product?.id, name: name, sku: sku);
+      var imageUrl = _imageUrl.text.trim();
+
+      if (_pickedImagePath != null && _pickedImagePath!.isNotEmpty) {
+        try {
+          imageUrl = await admin.uploadProductImage(
+            productId: productId,
+            localPath: _pickedImagePath!,
+          );
+        } on Failure catch (error) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Could not upload picture (${error.message}). Paste an image link instead, or enable Firebase Storage.',
+              ),
+            ),
+          );
+          setState(() => _saving = false);
+          return;
+        } catch (error) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Could not upload picture. Paste an image link instead. ($error)'),
+            ),
+          );
+          setState(() => _saving = false);
+          return;
+        }
+      }
+
+      final variants = [
+        for (final row in _variants)
+          if (row.name.text.trim().isNotEmpty)
+            ProductVariant(
+              id: row.id,
+              name: row.name.text.trim(),
+              price: row.price.text.trim().isEmpty ? '0' : row.price.text.trim(),
+              isDefault: row.isDefault,
+              recipeMultiplier: row.multiplier.text.trim().isEmpty ? '1' : row.multiplier.text.trim(),
+            ),
+      ];
+      await admin.saveProduct(
+        id: productId,
+        name: name,
+        sku: sku,
+        categoryId: _categoryId,
+        price: variants.isEmpty ? '0' : variants.first.price,
+        productType: _type,
+        active: _active,
+        imageUrl: imageUrl,
+        variants: variants,
+        options: [
+          for (final row in _options)
+            if (row.name.text.trim().isNotEmpty)
+              ProductOption(
+                id: row.id,
+                name: row.name.text.trim(),
+                extraPrice: row.price.text.trim().isEmpty ? '0' : row.price.text.trim(),
+              ),
+        ],
+      );
+      if (mounted) Navigator.pop(context, true);
+    } on Failure catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+      setState(() => _saving = false);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+      setState(() => _saving = false);
+    }
   }
 
   @override
@@ -368,6 +468,65 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
               TextField(controller: _name, decoration: const InputDecoration(labelText: 'Name')),
               const SizedBox(height: 12),
               TextField(controller: _sku, decoration: const InputDecoration(labelText: 'SKU')),
+              const SizedBox(height: 12),
+              Text('Picture (optional)', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 8),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ProductImage(
+                    imageUrl: _imageUrl.text.trim().isEmpty ? null : _imageUrl.text.trim(),
+                    localPath: _pickedImagePath,
+                    size: 72,
+                    borderRadius: 10,
+                    iconSize: 28,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                style: adminOutlinedButtonStyle,
+                                onPressed: _saving ? null : _pickImage,
+                                icon: const Icon(Icons.image_outlined, size: 18),
+                                label: Text(_pickedImagePath == null ? 'Choose picture' : 'Change picture'),
+                              ),
+                            ),
+                            if (_pickedImagePath != null || _imageUrl.text.trim().isNotEmpty) ...[
+                              const SizedBox(width: 8),
+                              IconButton(
+                                tooltip: 'Clear picture',
+                                onPressed: _saving
+                                    ? null
+                                    : () => setState(() {
+                                          _pickedImagePath = null;
+                                          _imageUrl.clear();
+                                        }),
+                                icon: const Icon(Icons.close),
+                              ),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _imageUrl,
+                          enabled: !_saving,
+                          decoration: const InputDecoration(
+                            labelText: 'Image link (if no picture)',
+                            hintText: 'https://…',
+                            helperText: 'Paste a URL when you do not have a local image file.',
+                          ),
+                          onChanged: (_) => setState(() {}),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
                 initialValue: _categoryId,
@@ -481,42 +640,20 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
         ),
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
         FilledButton(
-          onPressed: () async {
-            final variants = [
-              for (final row in _variants)
-                if (row.name.text.trim().isNotEmpty)
-                  ProductVariant(
-                    id: row.id,
-                    name: row.name.text.trim(),
-                    price: row.price.text.trim().isEmpty ? '0' : row.price.text.trim(),
-                    isDefault: row.isDefault,
-                    recipeMultiplier: row.multiplier.text.trim().isEmpty ? '1' : row.multiplier.text.trim(),
-                  ),
-            ];
-            await sl<AdminRepository>().saveProduct(
-              id: widget.product?.id,
-              name: _name.text.trim(),
-              sku: _sku.text.trim(),
-              categoryId: _categoryId,
-              price: variants.isEmpty ? '0' : variants.first.price,
-              productType: _type,
-              active: _active,
-              variants: variants,
-              options: [
-                for (final row in _options)
-                  if (row.name.text.trim().isNotEmpty)
-                    ProductOption(
-                      id: row.id,
-                      name: row.name.text.trim(),
-                      extraPrice: row.price.text.trim().isEmpty ? '0' : row.price.text.trim(),
-                    ),
-              ],
-            );
-            if (context.mounted) Navigator.pop(context, true);
-          },
-          child: const Text('Save'),
+          style: adminPrimaryButtonStyle,
+          onPressed: _saving ? null : _save,
+          child: _saving
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                )
+              : const Text('Save'),
         ),
       ],
     );

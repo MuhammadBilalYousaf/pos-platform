@@ -284,28 +284,28 @@ class _DashboardBody extends StatelessWidget {
   }
 
   Widget _chartCard(String title, Widget child, {double? height}) {
-    return Container(
-      height: height ?? 300,
-      decoration: BoxDecoration(
-        color: Colors.white,
+    return Material(
+      color: Colors.white,
+      elevation: 0,
+      shadowColor: Colors.black.withValues(alpha: 0.04),
+      shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kReportCardBorder),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        side: const BorderSide(color: kReportCardBorder),
       ),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
-          const SizedBox(height: 12),
-          Expanded(child: child),
-        ],
+      clipBehavior: Clip.antiAlias,
+      child: SizedBox(
+        height: height ?? 300,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+              const SizedBox(height: 12),
+              Expanded(child: child),
+            ],
+          ),
+        ),
       ),
     );
   }

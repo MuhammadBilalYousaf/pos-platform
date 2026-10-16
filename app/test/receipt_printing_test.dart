@@ -67,6 +67,18 @@ void main() {
       expect(cut, [0x1D, 0x56, 0x41, 0x10]);
     });
 
+    test('kitchen ticket has items, no prices, and its own cut', () {
+      final kitchen = ReceiptData.sample(businessName: 'Turk N Roll').asKitchen();
+      final bytes = encoder.encode(kitchen);
+      final asLatin1 = String.fromCharCodes(bytes.where((b) => b >= 32 && b < 127));
+      expect(asLatin1, contains('KITCHEN'));
+      expect(asLatin1, contains('Sample item'));
+      expect(asLatin1, isNot(contains('TOTAL')));
+      expect(asLatin1, isNot(contains('250.00')));
+      final cut = bytes.sublist(bytes.length - 4);
+      expect(cut, [0x1D, 0x56, 0x41, 0x10]);
+    });
+
     test('respects 58mm column width in money rows', () {
       final receipt = ReceiptData.sample(businessName: 'Cafe', paperWidthMm: 58);
       expect(receipt.columns, 32);
@@ -134,6 +146,77 @@ void main() {
 
       expect(settings.selectedPrinter, 'Rongta RP326');
       expect(transport.sends.single.printer, 'Rongta RP326');
+    });
+
+    test('printForMode both sends kitchen then customer, each with a cut', () async {
+      transport.printers = ['XP-80C'];
+      await service.configurePrinter('XP-80C');
+
+      await service.printForMode(
+        ReceiptData.sample(businessName: 'Demo Shop'),
+        ReceiptPrintMode.both,
+      );
+
+      expect(transport.sends, hasLength(2));
+      final kitchenText = String.fromCharCodes(
+        transport.sends[0].bytes.where((b) => b >= 32 && b < 127),
+      );
+      final customerText = String.fromCharCodes(
+        transport.sends[1].bytes.where((b) => b >= 32 && b < 127),
+      );
+      expect(kitchenText, contains('KITCHEN'));
+      expect(kitchenText, contains('Sample item'));
+      expect(kitchenText, isNot(contains('TOTAL')));
+      expect(kitchenText, isNot(contains('250.00')));
+      expect(customerText, contains('Demo Shop'));
+      expect(customerText, contains('TOTAL'));
+      expect(customerText, contains('550.00'));
+      expect(transport.sends[0].bytes.sublist(transport.sends[0].bytes.length - 4), [0x1D, 0x56, 0x41, 0x10]);
+      expect(transport.sends[1].bytes.sublist(transport.sends[1].bytes.length - 4), [0x1D, 0x56, 0x41, 0x10]);
+    });
+
+    test('printForMode kitchenOnly sends one kitchen job with cut', () async {
+      transport.printers = ['XP-80C'];
+      await service.configurePrinter('XP-80C');
+
+      await service.printForMode(
+        ReceiptData.sample(businessName: 'Demo Shop'),
+        ReceiptPrintMode.kitchenOnly,
+      );
+
+      expect(transport.sends, hasLength(1));
+      final text = String.fromCharCodes(transport.sends.single.bytes.where((b) => b >= 32 && b < 127));
+      expect(text, contains('KITCHEN'));
+      expect(text, isNot(contains('TOTAL')));
+      expect(transport.sends.single.bytes.sublist(transport.sends.single.bytes.length - 4), [0x1D, 0x56, 0x41, 0x10]);
+    });
+
+    test('printForMode customerOnly sends one priced customer job with cut', () async {
+      transport.printers = ['XP-80C'];
+      await service.configurePrinter('XP-80C');
+
+      await service.printForMode(
+        ReceiptData.sample(businessName: 'Demo Shop'),
+        ReceiptPrintMode.customerOnly,
+      );
+
+      expect(transport.sends, hasLength(1));
+      final text = String.fromCharCodes(transport.sends.single.bytes.where((b) => b >= 32 && b < 127));
+      expect(text, contains('TOTAL'));
+      expect(text, isNot(contains('KITCHEN')));
+      expect(transport.sends.single.bytes.sublist(transport.sends.single.bytes.length - 4), [0x1D, 0x56, 0x41, 0x10]);
+    });
+
+    test('printForMode none sends nothing', () async {
+      transport.printers = ['XP-80C'];
+      await service.configurePrinter('XP-80C');
+
+      await service.printForMode(
+        ReceiptData.sample(businessName: 'Demo Shop'),
+        ReceiptPrintMode.none,
+      );
+
+      expect(transport.sends, isEmpty);
     });
 
     test('printReceipt refuses when only virtual printers exist', () async {

@@ -13,7 +13,11 @@ class PlatformShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final session = (context.watch<AuthBloc>().state as AuthAuthenticated).session;
+    final auth = context.watch<AuthBloc>().state;
+    if (auth is! AuthAuthenticated) {
+      return const SizedBox.shrink();
+    }
+    final session = auth.session;
     return WorkbenchShell(
       title: Text('Super Admin · ${session.user.name}'),
       actions: [

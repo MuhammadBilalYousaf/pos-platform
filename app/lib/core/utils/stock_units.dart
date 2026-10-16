@@ -29,7 +29,7 @@ class StockUnits {
   }
 
   static Decimal toBase(String quantity, String unit) {
-    final qty = money(quantity);
+    final qty = parseMoneyInputOrThrow(quantity, label: 'Quantity');
     switch (normalize(unit)) {
       case 'KG':
         return qty * Decimal.fromInt(1000);

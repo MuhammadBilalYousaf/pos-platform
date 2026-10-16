@@ -31,6 +31,15 @@ class CatalogCubit extends Cubit<CatalogState> {
   void search(String query) {
     emit(state.copyWith(query: query));
   }
+
+  /// Exact barcode / SKU match for scanner input (product SKU, id, or variant SKU/id).
+  BarcodeMatch? findByBarcode(String raw) => state.findByBarcode(raw);
+}
+
+class BarcodeMatch {
+  const BarcodeMatch({required this.product, this.variant});
+  final CatalogProduct product;
+  final ProductVariant? variant;
 }
 
 bool _categoryMatches(PosCatalog? catalog, String productCategoryId, String? selectedId) {
@@ -70,6 +79,24 @@ class CatalogState extends Equatable {
           _categoryMatches(catalog, product.categoryId, selectedCategoryId);
       return product.active && matchesCategory && matchesQuery && product.variants.isNotEmpty;
     }).toList();
+  }
+
+  BarcodeMatch? findByBarcode(String raw) {
+    final code = raw.trim().toLowerCase();
+    if (code.isEmpty) return null;
+    for (final product in catalog?.products ?? const <CatalogProduct>[]) {
+      if (!product.active || product.variants.isEmpty) continue;
+      if ((product.sku ?? '').trim().toLowerCase() == code || product.id.toLowerCase() == code) {
+        return BarcodeMatch(product: product);
+      }
+      for (final variant in product.variants) {
+        final variantSku = (variant.sku ?? '').trim().toLowerCase();
+        if (variantSku == code || variant.id.toLowerCase() == code) {
+          return BarcodeMatch(product: product, variant: variant);
+        }
+      }
+    }
+    return null;
   }
 
   CatalogState copyWith({

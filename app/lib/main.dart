@@ -1,4 +1,5 @@
-import 'dart:io';
+import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -10,6 +11,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'config/dependency_injection/injection.dart';
 import 'config/firebase/firebase_options.dart';
 import 'core/theme/app_theme.dart';
+import 'core/utils/app_log.dart';
 import 'features/auth/presentation/bloc/auth_bloc.dart';
 import 'features/auth/presentation/pages/login_page.dart';
 import 'features/auth/presentation/pages/role_home.dart';
@@ -20,18 +22,76 @@ import 'features/products/presentation/bloc/catalog_cubit.dart';
 import 'features/sync/presentation/bloc/sync_cubit.dart';
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  if (DefaultFirebaseOptions.isConfigured) {
-    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-    if (!kIsWeb && Platform.isWindows) {
-      // The Windows release SDK drops the login token unless Auth is
-      // listened to first, and its disk cache aborts sale transactions.
-      FirebaseAuth.instance.idTokenChanges().listen((_) {});
-      FirebaseFirestore.instance.settings = const Settings(persistenceEnabled: false);
+  await runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+    await AppLog.init();
+
+    // Keep release builds alive: surface errors instead of killing the process.
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details);
+      AppLog.error('FlutterError', details.exception, details.stack);
+    };
+    PlatformDispatcher.instance.onError = (error, stack) {
+      AppLog.error('Uncaught platform error', error, stack);
+      return true; // mark handled — do not abort the isolate
+    };
+    ErrorWidget.builder = (details) {
+      AppLog.error('ErrorWidget', details.exception, details.stack);
+      return Material(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(
+              'Something went wrong on this screen.\n${details.exception}\n\n'
+              'Log: ${AppLog.path ?? 'Documents\\\\POS\\\\pos_app_log.txt'}',
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      );
+    };
+
+    try {
+      if (DefaultFirebaseOptions.isConfigured) {
+        await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+        if (!kIsWeb && Platform.isWindows) {
+          // The Windows release SDK drops the login token unless Auth is
+          // listened to first, and its disk cache aborts sale transactions.
+          FirebaseAuth.instance.idTokenChanges().listen((_) {});
+          FirebaseFirestore.instance.settings = const Settings(persistenceEnabled: false);
+        }
+      }
+      await configureDependencies();
+      await AppLog.info('App started OK');
+    } catch (error, stack) {
+      await AppLog.error('Startup failed', error, stack);
+      runApp(_StartupErrorApp(message: '$error\n\nLog: ${AppLog.path ?? ''}'));
+      return;
     }
+
+    runApp(const PosApp());
+  }, (error, stack) {
+    AppLog.error('Zone error', error, stack);
+  });
+}
+
+class _StartupErrorApp extends StatelessWidget {
+  const _StartupErrorApp({required this.message});
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text('App failed to start:\n\n$message', textAlign: TextAlign.center),
+          ),
+        ),
+      ),
+    );
   }
-  await configureDependencies();
-  runApp(const PosApp());
 }
 
 class PosApp extends StatefulWidget {

@@ -1,3 +1,4 @@
+import 'package:decimal/decimal.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_app/core/utils/order_totals.dart';
 
@@ -17,5 +18,14 @@ void main() {
     expect(result.discountAmount, '20.00');
     expect(result.taxAmount, '32.50');
     expect(result.total, '682.50');
+  });
+
+  test('resolveDiscount supports rupees and percent', () {
+    final base = Decimal.parse('1000');
+    expect(moneyString(resolveDiscount(baseAmount: base, value: '100', isPercent: false)), '100.00');
+    expect(moneyString(resolveDiscount(baseAmount: base, value: '10', isPercent: true)), '100.00');
+    expect(moneyString(resolveDiscount(baseAmount: base, value: '150', isPercent: true)), '1000.00');
+    expect(formatDiscountLabel(value: '10', isPercent: true), '10%');
+    expect(formatDiscountLabel(value: '50', isPercent: false), 'Rs. 50');
   });
 }

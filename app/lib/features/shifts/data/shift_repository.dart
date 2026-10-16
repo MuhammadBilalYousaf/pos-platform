@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:decimal/decimal.dart';
 import 'package:hive/hive.dart';
 import '../../../core/errors/failures.dart';
 import '../../../core/firebase/firestore_host.dart';
@@ -21,6 +22,10 @@ class PosShift {
     this.closingNote,
     this.openingCash,
     this.closingCash,
+    this.expectedCash,
+    this.cashVariance,
+    this.cashSalesTotal,
+    this.cashRefundTotal,
   });
 
   final String id;
@@ -36,6 +41,10 @@ class PosShift {
   final String? closingNote;
   final String? openingCash;
   final String? closingCash;
+  final String? expectedCash;
+  final String? cashVariance;
+  final String? cashSalesTotal;
+  final String? cashRefundTotal;
 
   bool get isOpen => status == 'OPEN' && endedAt == null;
 
@@ -52,6 +61,10 @@ class PosShift {
         'closingNote': closingNote,
         'openingCash': openingCash,
         'closingCash': closingCash,
+        'expectedCash': expectedCash,
+        'cashVariance': cashVariance,
+        'cashSalesTotal': cashSalesTotal,
+        'cashRefundTotal': cashRefundTotal,
       };
 
   factory PosShift.fromJson(Map<String, dynamic> data, {String? id}) {
@@ -76,6 +89,10 @@ class PosShift {
       closingNote: pick(data, ['closing_note', 'closingNote'])?.toString(),
       openingCash: pick(data, ['opening_cash', 'openingCash'])?.toString(),
       closingCash: pick(data, ['closing_cash', 'closingCash'])?.toString(),
+      expectedCash: pick(data, ['expected_cash', 'expectedCash'])?.toString(),
+      cashVariance: pick(data, ['cash_variance', 'cashVariance'])?.toString(),
+      cashSalesTotal: pick(data, ['cash_sales_total', 'cashSalesTotal'])?.toString(),
+      cashRefundTotal: pick(data, ['cash_refund_total', 'cashRefundTotal'])?.toString(),
     );
   }
 }
@@ -87,6 +104,9 @@ class ShiftSummary {
     required this.salesTotal,
     required this.refundTotal,
     required this.cancelCount,
+    required this.cashSalesTotal,
+    required this.cashRefundTotal,
+    required this.expectedCash,
   });
 
   final PosShift shift;
@@ -94,6 +114,16 @@ class ShiftSummary {
   final String salesTotal;
   final String refundTotal;
   final int cancelCount;
+  final String cashSalesTotal;
+  final String cashRefundTotal;
+  /// Opening cash + cash sales − cash refunds.
+  final String expectedCash;
+
+  String varianceFor(String countedCash) {
+    final counted = moneyOrZero(countedCash);
+    final expected = moneyOrZero(expectedCash);
+    return moneyString(counted - expected);
+  }
 }
 
 class ShiftRepository {
@@ -210,6 +240,10 @@ class ShiftRepository {
     required String shiftId,
     String? closingCash,
     String? closingNote,
+    String? expectedCash,
+    String? cashVariance,
+    String? cashSalesTotal,
+    String? cashRefundTotal,
   }) async {
     final businessId = _tenant.requireBusinessId();
     final ref = _firestore.requireDb().collection('businesses').doc(businessId).collection('shifts').doc(shiftId);
@@ -230,6 +264,10 @@ class ShiftRepository {
       'ended_by': _tenant.userId,
       if (closingCash != null && closingCash.isNotEmpty) 'closing_cash': closingCash,
       if (closingNote != null && closingNote.isNotEmpty) 'closing_note': closingNote,
+      if (expectedCash != null && expectedCash.isNotEmpty) 'expected_cash': expectedCash,
+      if (cashVariance != null && cashVariance.isNotEmpty) 'cash_variance': cashVariance,
+      if (cashSalesTotal != null && cashSalesTotal.isNotEmpty) 'cash_sales_total': cashSalesTotal,
+      if (cashRefundTotal != null && cashRefundTotal.isNotEmpty) 'cash_refund_total': cashRefundTotal,
     }, SetOptions(merge: true));
     await _cache.delete(_cacheKey(branchId));
     final updated = asStringKeyMap(snap.data());
@@ -239,6 +277,10 @@ class ShiftRepository {
     updated['ended_by'] = _tenant.userId;
     if (closingCash != null) updated['closing_cash'] = closingCash;
     if (closingNote != null) updated['closing_note'] = closingNote;
+    if (expectedCash != null) updated['expected_cash'] = expectedCash;
+    if (cashVariance != null) updated['cash_variance'] = cashVariance;
+    if (cashSalesTotal != null) updated['cash_sales_total'] = cashSalesTotal;
+    if (cashRefundTotal != null) updated['cash_refund_total'] = cashRefundTotal;
     return PosShift.fromJson(updated, id: shiftId);
   }
 
@@ -256,9 +298,17 @@ class ShiftRepository {
 
   Future<ShiftSummary> summarizeShift(PosShift shift) async {
     final businessId = _tenant.requireBusinessId();
-    final orders = await _firestore.requireDb().collection('businesses').doc(businessId).collection('orders').where('shift_id', isEqualTo: shift.id).get();
-    var sales = money('0');
-    var refunds = money('0');
+    final orders = await _firestore
+        .requireDb()
+        .collection('businesses')
+        .doc(businessId)
+        .collection('orders')
+        .where('shift_id', isEqualTo: shift.id)
+        .get();
+    var sales = Decimal.zero;
+    var refunds = Decimal.zero;
+    var cashSales = Decimal.zero;
+    var cashRefunds = Decimal.zero;
     var cancels = 0;
     var count = 0;
     for (final doc in orders.docs) {
@@ -269,16 +319,45 @@ class ShiftRepository {
         continue;
       }
       count += 1;
-      sales += money(readString(data, ['total'], '0'));
-      refunds += money(readString(data, ['refund_total'], '0'));
+      final total = moneyOrZero(readString(data, ['total'], '0'));
+      final refundTotal = moneyOrZero(readString(data, ['refund_total'], '0'));
+      sales += total;
+      refunds += refundTotal;
+      final cashPaid = _cashPaidOnOrder(data);
+      if (cashPaid > Decimal.zero) {
+        cashSales += cashPaid;
+        cashRefunds += refundTotal;
+      }
     }
+    final opening = moneyOrZero(shift.openingCash);
+    final expected = opening + cashSales - cashRefunds;
     return ShiftSummary(
       shift: shift,
       orderCount: count,
       salesTotal: moneyString(sales),
       refundTotal: moneyString(refunds),
       cancelCount: cancels,
+      cashSalesTotal: moneyString(cashSales),
+      cashRefundTotal: moneyString(cashRefunds),
+      expectedCash: moneyString(expected < Decimal.zero ? Decimal.zero : expected),
     );
+  }
+
+  /// Cash tendered into the drawer for this order (payment amount when method is CASH).
+  Decimal _cashPaidOnOrder(Map<String, dynamic> data) {
+    var cash = Decimal.zero;
+    for (final raw in readList(data, ['payments'])) {
+      final payment = asStringKeyMap(raw);
+      final method = readString(payment, ['method']).toUpperCase();
+      if (method != 'CASH') continue;
+      final amount = readString(payment, ['amount'], '');
+      if (amount.isNotEmpty) {
+        cash += moneyOrZero(amount);
+      } else {
+        cash += moneyOrZero(readString(data, ['total'], '0'));
+      }
+    }
+    return cash;
   }
 }
 

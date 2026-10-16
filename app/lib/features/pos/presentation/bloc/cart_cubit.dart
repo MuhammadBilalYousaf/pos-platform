@@ -16,6 +16,7 @@ class CartLine extends Equatable {
     required this.quantity,
     this.options = const [],
     this.lineDiscount = '0',
+    this.lineDiscountIsPercent = false,
     this.note,
   });
 
@@ -25,6 +26,7 @@ class CartLine extends Equatable {
   final int quantity;
   final List<ProductOption> options;
   final String lineDiscount;
+  final bool lineDiscountIsPercent;
   final String? note;
 
   String get extraPrice {
@@ -46,7 +48,27 @@ class CartLine extends Equatable {
     return '${product.name} (${extras.join(', ')})';
   }
 
-  CartLine copyWith({int? quantity, List<ProductOption>? options, String? lineDiscount, String? note}) {
+  Decimal get rawLineTotal {
+    final qty = Decimal.fromInt(quantity);
+    final unit = money(variant.price) + money(extraPrice);
+    return unit * qty;
+  }
+
+  String get resolvedLineDiscountAmount => moneyString(
+        resolveDiscount(
+          baseAmount: rawLineTotal,
+          value: lineDiscount,
+          isPercent: lineDiscountIsPercent,
+        ),
+      );
+
+  CartLine copyWith({
+    int? quantity,
+    List<ProductOption>? options,
+    String? lineDiscount,
+    bool? lineDiscountIsPercent,
+    String? note,
+  }) {
     return CartLine(
       key: key,
       product: product,
@@ -54,6 +76,7 @@ class CartLine extends Equatable {
       quantity: quantity ?? this.quantity,
       options: options ?? this.options,
       lineDiscount: lineDiscount ?? this.lineDiscount,
+      lineDiscountIsPercent: lineDiscountIsPercent ?? this.lineDiscountIsPercent,
       note: note ?? this.note,
     );
   }
@@ -65,6 +88,7 @@ class CartLine extends Equatable {
         'quantity': quantity,
         'options': options.map((item) => item.toJson()).toList(),
         'lineDiscount': lineDiscount,
+        'lineDiscountIsPercent': lineDiscountIsPercent,
         'note': note,
       };
 
@@ -76,18 +100,20 @@ class CartLine extends Equatable {
       quantity: readInt(json, ['quantity'], 1),
       options: readList(json, ['options']).map((item) => ProductOption.fromJson(asStringKeyMap(item))).toList(),
       lineDiscount: readString(json, ['lineDiscount'], '0'),
+      lineDiscountIsPercent: readBool(json, ['lineDiscountIsPercent', 'line_discount_is_percent']),
       note: pick(json, ['note'])?.toString(),
     );
   }
 
   @override
-  List<Object?> get props => [key, product, variant, quantity, options, lineDiscount, note];
+  List<Object?> get props => [key, product, variant, quantity, options, lineDiscount, lineDiscountIsPercent, note];
 }
 
 class CartState extends Equatable {
   const CartState({
     required this.lines,
     this.orderDiscount = '0.00',
+    this.orderDiscountIsPercent = false,
     this.taxRate = '0',
     this.orderType = 'TAKEAWAY',
     this.customerName,
@@ -99,6 +125,7 @@ class CartState extends Equatable {
 
   final List<CartLine> lines;
   final String orderDiscount;
+  final bool orderDiscountIsPercent;
   final String taxRate;
   final String orderType;
   final String? customerName;
@@ -108,26 +135,40 @@ class CartState extends Equatable {
   /// Bumped when held-ticket list changes so POS UI rebuilds recall count.
   final int heldSnapshot;
 
-  OrderTotals get totals => calculateOrderTotals(
-        lines: lines
-            .map(
-              (line) => OrderLineInput(
-                quantity: line.quantity.toString(),
-                unitPrice: line.variant.price,
-                extraPrice: line.extraPrice,
-                discountAmount: line.lineDiscount,
-              ),
-            )
-            .toList(),
-        orderDiscountAmount: orderDiscount,
-        taxRate: taxRate,
-      );
+  OrderTotals get totals {
+    final resolvedLines = [
+      for (final line in lines)
+        OrderLineInput(
+          quantity: line.quantity.toString(),
+          unitPrice: line.variant.price,
+          extraPrice: line.extraPrice,
+          discountAmount: line.resolvedLineDiscountAmount,
+        ),
+    ];
+    // First pass: line discounts already resolved → get subtotal before order discount.
+    final afterLines = calculateOrderTotals(
+      lines: resolvedLines,
+      orderDiscountAmount: '0',
+      taxRate: '0',
+    );
+    final orderDisc = resolveDiscount(
+      baseAmount: moneyOrZero(afterLines.subtotal),
+      value: orderDiscount,
+      isPercent: orderDiscountIsPercent,
+    );
+    return calculateOrderTotals(
+      lines: resolvedLines,
+      orderDiscountAmount: moneyString(orderDisc),
+      taxRate: taxRate,
+    );
+  }
 
   bool get isEmpty => lines.isEmpty;
 
   CartState copyWith({
     List<CartLine>? lines,
     String? orderDiscount,
+    bool? orderDiscountIsPercent,
     String? taxRate,
     String? orderType,
     String? customerName,
@@ -140,6 +181,7 @@ class CartState extends Equatable {
     return CartState(
       lines: lines ?? this.lines,
       orderDiscount: orderDiscount ?? this.orderDiscount,
+      orderDiscountIsPercent: orderDiscountIsPercent ?? this.orderDiscountIsPercent,
       taxRate: taxRate ?? this.taxRate,
       orderType: orderType ?? this.orderType,
       customerName: clearCustomer ? null : (customerName ?? this.customerName),
@@ -153,6 +195,7 @@ class CartState extends Equatable {
   Map<String, dynamic> toJson() => {
         'lines': lines.map((item) => item.toJson()).toList(),
         'orderDiscount': orderDiscount,
+        'orderDiscountIsPercent': orderDiscountIsPercent,
         'taxRate': taxRate,
         'orderType': orderType,
         'customerName': customerName,
@@ -165,6 +208,7 @@ class CartState extends Equatable {
     return CartState(
       lines: readList(json, ['lines']).map((item) => CartLine.fromJson(asStringKeyMap(item))).toList(),
       orderDiscount: readString(json, ['orderDiscount'], '0.00'),
+      orderDiscountIsPercent: readBool(json, ['orderDiscountIsPercent', 'order_discount_is_percent']),
       taxRate: readString(json, ['taxRate'], '0'),
       orderType: readString(json, ['orderType'], 'TAKEAWAY'),
       customerName: pick(json, ['customerName'])?.toString(),
@@ -175,7 +219,18 @@ class CartState extends Equatable {
   }
 
   @override
-  List<Object?> get props => [lines, orderDiscount, taxRate, orderType, customerName, customerPhone, tableNo, note, heldSnapshot];
+  List<Object?> get props => [
+        lines,
+        orderDiscount,
+        orderDiscountIsPercent,
+        taxRate,
+        orderType,
+        customerName,
+        customerPhone,
+        tableNo,
+        note,
+        heldSnapshot,
+      ];
 }
 
 class HeldTicket {
@@ -214,8 +269,20 @@ class CartCubit extends Cubit<CartState> {
     emit(state.copyWith(customerName: name, customerPhone: phone));
   }
 
-  void setTicketMeta({String? tableNo, String? note, String? discount}) {
-    emit(state.copyWith(tableNo: tableNo, note: note, orderDiscount: discount ?? state.orderDiscount));
+  void setTicketMeta({
+    String? tableNo,
+    String? note,
+    String? discount,
+    bool? discountIsPercent,
+  }) {
+    emit(
+      state.copyWith(
+        tableNo: tableNo,
+        note: note,
+        orderDiscount: discount ?? state.orderDiscount,
+        orderDiscountIsPercent: discountIsPercent ?? state.orderDiscountIsPercent,
+      ),
+    );
   }
 
   void addProduct(CatalogProduct product, {ProductVariant? variant, List<ProductOption> options = const []}) {
@@ -274,15 +341,22 @@ class CartCubit extends Cubit<CartState> {
     emit(state.copyWith(lines: state.lines.where((line) => line.key != key).toList()));
   }
 
-  void setLineDiscount(String key, String amount) {
+  void setLineDiscount(String key, String amount, {bool isPercent = false}) {
     emit(
       state.copyWith(
-        lines: state.lines.map((line) => line.key == key ? line.copyWith(lineDiscount: amount) : line).toList(),
+        lines: state.lines
+            .map(
+              (line) => line.key == key
+                  ? line.copyWith(lineDiscount: amount, lineDiscountIsPercent: isPercent)
+                  : line,
+            )
+            .toList(),
       ),
     );
   }
 
-  void setDiscount(String amount) => emit(state.copyWith(orderDiscount: amount));
+  void setDiscount(String amount, {bool isPercent = false}) =>
+      emit(state.copyWith(orderDiscount: amount, orderDiscountIsPercent: isPercent));
 
   Future<void> holdTicket() async {
     if (state.isEmpty) {

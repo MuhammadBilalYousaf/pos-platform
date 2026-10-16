@@ -63,6 +63,8 @@ class RecipeCostBreakdown {
 
 /// Calculates recipe cost from current ingredient unit costs (for display / planning).
 /// Historical order costs remain frozen on the order document and are not overwritten.
+///
+/// Never throws — invalid quantities are treated as zero so UI rebuilds stay safe in release.
 class RecipeCostCalculator {
   static RecipeCostBreakdown forVariant({
     required ProductRecipe recipe,
@@ -90,7 +92,7 @@ class RecipeCostCalculator {
           useMultiplier = false;
         }
       }
-      final qtyBase = StockUnits.toBase(qtyText, unit) * (useMultiplier ? multiplier : Decimal.one);
+      final qtyBase = _qtyBase(qtyText, unit) * (useMultiplier ? multiplier : Decimal.one);
       final unitCost = cost?.unitCostPerBase ?? Decimal.zero;
       final lineCost = qtyBase * unitCost;
       total += lineCost;
@@ -113,7 +115,19 @@ class RecipeCostCalculator {
       totalCost: total,
       variantId: variantId,
       variantName: variantName,
-      sellPrice: sellPrice == null || sellPrice.isEmpty ? null : money(sellPrice),
+      sellPrice: sellPrice == null || sellPrice.isEmpty ? null : moneyOrZero(sellPrice),
     );
+  }
+
+  static Decimal _qtyBase(String quantity, String unit) {
+    final parsed = parseMoneyInput(quantity);
+    if (parsed == null || parsed <= Decimal.zero) return Decimal.zero;
+    switch (StockUnits.normalize(unit)) {
+      case 'KG':
+      case 'L':
+        return parsed * Decimal.fromInt(1000);
+      default:
+        return parsed;
+    }
   }
 }

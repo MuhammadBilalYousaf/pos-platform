@@ -1,8 +1,12 @@
+import 'dart:io';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:decimal/decimal.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import '../../../core/errors/failures.dart';
 import '../../../core/firebase/firestore_host.dart';
 import '../../../core/firebase/tenant_context.dart';
+import '../../../core/utils/app_log.dart';
 import '../../../core/utils/json_read.dart';
 import '../../../core/utils/order_totals.dart';
 import '../../../core/utils/password_hash.dart';
@@ -12,6 +16,7 @@ import '../../auth/data/seed/turknroll_seed.dart';
 import '../../auth/domain/entities/session.dart';
 import '../../auth/domain/permissions.dart';
 import '../../products/domain/entities/catalog.dart';
+import '../domain/named_discount.dart';
 
 class StaffMember {
   const StaffMember({
@@ -412,6 +417,9 @@ class AdminRepository {
     String? phone,
     String? receiptHeader,
     String? receiptFooter,
+    bool? requireOpenShift,
+    bool? diningTablesEnabled,
+    List<String>? diningTables,
   }) async {
     try {
       final businessId = _tenant.requireBusinessId();
@@ -425,6 +433,9 @@ class AdminRepository {
         'phone': phone,
         if (receiptHeader != null) 'receipt_header': receiptHeader,
         if (receiptFooter != null) 'receipt_footer': receiptFooter,
+        if (requireOpenShift != null) 'require_open_shift': requireOpenShift,
+        if (diningTablesEnabled != null) 'dining_tables_enabled': diningTablesEnabled,
+        if (diningTables != null) 'dining_tables': diningTables,
       }, SetOptions(merge: true));
     } catch (error) {
       throw mapFirebaseFailure(error);
@@ -538,6 +549,52 @@ class AdminRepository {
     }
   }
 
+  /// Resolves the Firestore product document id used for create/update.
+  String resolveProductId({String? id, required String name, required String sku}) {
+    if (id != null && id.isNotEmpty) return id;
+    return sku.trim().isEmpty ? _slug(name) : sku.trim();
+  }
+
+  /// Uploads a local image file and returns a download URL for [image_url].
+  Future<String> uploadProductImage({
+    required String productId,
+    required String localPath,
+  }) async {
+    try {
+      final businessId = _tenant.requireBusinessId();
+      final file = File(localPath);
+      if (!await file.exists()) {
+        throw const Failure('Image file was not found.');
+      }
+      final lower = localPath.toLowerCase();
+      final ext = lower.endsWith('.png')
+          ? 'png'
+          : lower.endsWith('.webp')
+              ? 'webp'
+              : lower.endsWith('.gif')
+                  ? 'gif'
+                  : 'jpg';
+      final contentType = switch (ext) {
+        'png' => 'image/png',
+        'webp' => 'image/webp',
+        'gif' => 'image/gif',
+        _ => 'image/jpeg',
+      };
+      final ref = FirebaseStorage.instance
+          .ref()
+          .child('businesses')
+          .child(businessId)
+          .child('products')
+          .child(productId)
+          .child('image.$ext');
+      await ref.putFile(file, SettableMetadata(contentType: contentType));
+      return await ref.getDownloadURL();
+    } catch (error) {
+      if (error is Failure) rethrow;
+      throw mapFirebaseFailure(error);
+    }
+  }
+
   Future<void> saveProduct({
     required String name,
     required String sku,
@@ -545,13 +602,14 @@ class AdminRepository {
     required String price,
     required String productType,
     String? id,
+    String? imageUrl,
     bool active = true,
     List<ProductVariant> variants = const [],
     List<ProductOption> options = const [],
   }) async {
     try {
       final businessId = _tenant.requireBusinessId();
-      final productId = (id != null && id.isNotEmpty) ? id : (sku.isEmpty ? _slug(name) : sku);
+      final productId = resolveProductId(id: id, name: name, sku: sku);
       final savedVariants = variants.isNotEmpty
           ? variants
           : [
@@ -563,6 +621,7 @@ class AdminRepository {
               ),
             ];
       final hasDefault = savedVariants.any((item) => item.isDefault);
+      final trimmedImage = imageUrl?.trim() ?? '';
       await _firestore.requireDb().collection('businesses').doc(businessId).collection('products').doc(productId).set({
         'id': productId,
         'category_id': categoryId,
@@ -571,6 +630,7 @@ class AdminRepository {
         'product_type': productType,
         'tracks_inventory': productType == 'RECIPE',
         'active': active,
+        'image_url': trimmedImage,
         'variants': [
           for (var index = 0; index < savedVariants.length; index++)
             {
@@ -925,39 +985,42 @@ class AdminRepository {
     required String delta,
     required String reason,
   }) async {
-    Failure? localFailure;
     try {
+      if (inventoryId.trim().isEmpty) {
+        throw const Failure('Inventory item was not found.');
+      }
       final change = parseMoneyInputOrThrow(delta, label: 'Stock change');
       final businessId = _tenant.requireBusinessId();
       final db = _firestore.requireDb();
       final ref = db.collection('businesses').doc(businessId).collection('inventory').doc(inventoryId);
-      await db.runTransaction((tx) async {
-        final snap = await tx.get(ref);
-        if (!snap.exists) {
-          localFailure = const Failure('Inventory item was not found.');
-          throw localFailure!;
-        }
-        final data = asStringKeyMap(snap.data());
-        final branchId = readString(data, ['branch_id', 'branchId'], inventoryId.split('_').first);
-        final next = money(readString(data, ['quantity_base', 'quantityBase'], '0')) + change;
-        if (next < money('0')) {
-          localFailure = const Failure('Stock cannot go below zero.');
-          throw localFailure!;
-        }
-        tx.update(ref, {'quantity_base': moneyString(next)});
-        tx.set(db.collection('businesses').doc(businessId).collection('inventory_transactions').doc(), {
-          'type': 'ADJUST',
-          'branch_id': branchId,
-          'quantity_base': moneyString(change),
-          'reason': reason,
-          'inventory_id': inventoryId,
-          'created_at': FieldValue.serverTimestamp(),
-          'created_by': _tenant.userId,
-        });
+
+      // Plain get/update (no runTransaction) — Windows Firebase C++ transactions can hard-crash the process.
+      final existing = await ref.get();
+      if (!existing.exists) {
+        throw const Failure('Inventory item was not found.');
+      }
+      final existingData = asStringKeyMap(existing.data());
+      final current = moneyOrZero(readString(existingData, ['quantity_base', 'quantityBase'], '0'));
+      final next = current + change;
+      if (next < Decimal.zero) {
+        throw const Failure('Stock cannot go below zero.');
+      }
+      final branchId = readString(existingData, ['branch_id', 'branchId'], inventoryId.split('_').first);
+      await ref.update({'quantity_base': moneyString(next)});
+
+      final txDocId = '${inventoryId}_${DateTime.now().microsecondsSinceEpoch}';
+      await db.collection('businesses').doc(businessId).collection('inventory_transactions').doc(txDocId).set({
+        'type': 'ADJUST',
+        'branch_id': branchId,
+        'quantity_base': moneyString(change),
+        'reason': reason,
+        'inventory_id': inventoryId,
+        'created_at': DateTime.now().toUtc().toIso8601String(),
+        'created_by': _tenant.userId,
       });
+    } on Failure {
+      rethrow;
     } catch (error) {
-      if (localFailure != null) throw localFailure!;
-      if (error is Failure) rethrow;
       throw mapFirebaseFailure(error);
     }
   }
@@ -1299,6 +1362,14 @@ class AdminRepository {
       return snap.docs.map((doc) {
         final data = asStringKeyMap(doc.data());
         data['id'] = doc.id;
+        if (collection == 'discounts') {
+          final discount = NamedDiscount.fromJson(data);
+          return {
+            'id': discount.id,
+            'name': discount.name,
+            'subtitle': formatDiscountLabel(value: discount.value, isPercent: discount.isPercent),
+          };
+        }
         return {
           'id': doc.id,
           'name': readString(data, ['name']),
@@ -1310,6 +1381,23 @@ class AdminRepository {
           ].where((part) => part.isNotEmpty).join(' · '),
         };
       }).toList();
+    } catch (error) {
+      throw mapFirebaseFailure(error);
+    }
+  }
+
+  Future<List<NamedDiscount>> listDiscounts() async {
+    try {
+      final businessId = _tenant.requireBusinessId();
+      final snap =
+          await _firestore.requireDb().collection('businesses').doc(businessId).collection('discounts').get();
+      final rows = snap.docs.map((doc) {
+        final data = asStringKeyMap(doc.data());
+        data['id'] = doc.id;
+        return NamedDiscount.fromJson(data);
+      }).toList();
+      rows.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      return rows;
     } catch (error) {
       throw mapFirebaseFailure(error);
     }
@@ -1395,8 +1483,14 @@ class AdminRepository {
     required List<RecipeLine> components,
   }) async {
     try {
+      await AppLog.info('produceMixture: validate inputs');
       final branchId = _tenant.requireBranchId();
       final businessId = _tenant.requireBusinessId();
+      await AppLog.info('produceMixture: branch=$branchId business=$businessId');
+      final mixKey = mixtureId.trim();
+      if (mixKey.isEmpty) {
+        throw const Failure('Choose a mixture to prepare.');
+      }
       final yieldBase = StockUnits.toBase(yieldQuantity, yieldUnit);
       if (yieldBase <= Decimal.zero) {
         throw const Failure('Yield must be greater than zero.');
@@ -1409,8 +1503,12 @@ class AdminRepository {
       final needs = <String, Decimal>{};
       final labels = <String, String>{};
       for (final line in lines) {
-        final ingredientId = line.ingredientId.trim().toUpperCase();
-        if (!seen.add(ingredientId)) {
+        final ingredientId = line.ingredientId.trim();
+        final normalizedId = ingredientId.toUpperCase();
+        if (normalizedId == mixKey.toUpperCase()) {
+          throw const Failure('A mixture cannot use itself as an ingredient.');
+        }
+        if (!seen.add(normalizedId)) {
           throw Failure('Ingredient $ingredientId is listed more than once. Combine quantities into one row.');
         }
         final used = StockUnits.toBase(line.quantity, line.unit);
@@ -1423,52 +1521,70 @@ class AdminRepository {
 
       final db = _firestore.requireDb();
       final inventory = db.collection('businesses').doc(businessId).collection('inventory');
-      // Validate all stock first so we never partially deduct on failure.
+
+      await AppLog.info('produceMixture: checking stock for ${needs.length} ingredient(s)');
+      final resolvedNeeds = <String, Decimal>{};
       for (final entry in needs.entries) {
-        final snap = await inventory.doc(entry.key).get();
+        final label = labels[entry.key] ?? entry.key;
+        var key = entry.key;
+        await AppLog.info('produceMixture: get inventory $key');
+        var snap = await inventory.doc(key).get();
+        if (!snap.exists) {
+          final altKey = '${branchId}_${label.toUpperCase()}';
+          if (altKey != key) {
+            await AppLog.info('produceMixture: try alt key $altKey');
+            final altSnap = await inventory.doc(altKey).get();
+            if (altSnap.exists) {
+              key = altKey;
+              snap = altSnap;
+            }
+          }
+        }
         if (!snap.exists) {
           throw Failure(
-            'Stock for ${labels[entry.key]} was not found in this branch. Add it under Inventory first.',
+            'Stock for $label was not found in this branch. Add it under Inventory first.',
           );
         }
         final data = asStringKeyMap(snap.data());
-        final current = money(readString(data, ['quantity_base', 'quantityBase'], '0'));
+        final current = moneyOrZero(readString(data, ['quantity_base', 'quantityBase'], '0'));
         if (current < entry.value) {
-          final name = readString(data, ['ingredient_name', 'ingredientName'], labels[entry.key] ?? entry.key);
+          final name = readString(data, ['ingredient_name', 'ingredientName'], label);
           final unit = readString(data, ['unit'], 'PCS');
           throw Failure(
             'Insufficient stock for $name. Need ${StockUnits.fromBase(entry.value, unit)} $unit, available ${StockUnits.fromBase(current, unit)} $unit.',
           );
         }
+        resolvedNeeds[key] = (resolvedNeeds[key] ?? Decimal.zero) + entry.value;
       }
 
       var mixtureCost = Decimal.zero;
-      for (final entry in needs.entries) {
+      for (final entry in resolvedNeeds.entries) {
+        await AppLog.info('produceMixture: deduct ${entry.key} by ${entry.value}');
         final snap = await inventory.doc(entry.key).get();
-        final data = asStringKeyMap(snap.data());
-        final unitCost = money(readString(data, ['unit_cost_per_base', 'unitCostPerBase'], '0'));
+        final data = asStringKeyMap(snap.data() ?? const <String, dynamic>{});
+        final unitCost = moneyOrZero(readString(data, ['unit_cost_per_base', 'unitCostPerBase'], '0'));
         mixtureCost += unitCost * entry.value;
         await adjustStock(
           inventoryId: entry.key,
           delta: '-${moneyString(entry.value)}',
-          reason: 'Produce $mixtureId',
+          reason: 'Produce $mixKey',
         );
       }
 
-      final mixId = '${branchId}_$mixtureId';
+      final mixId = '${branchId}_$mixKey';
       final ref = inventory.doc(mixId);
+      await AppLog.info('produceMixture: ensure mixture stock $mixId');
       final snap = await ref.get();
-      final mixtureName = mixtureId;
       if (!snap.exists) {
         final ingredientSnap =
-            await db.collection('businesses').doc(businessId).collection('ingredients').doc(mixtureId).get();
+            await db.collection('businesses').doc(businessId).collection('ingredients').doc(mixKey).get();
         final ingredientName = ingredientSnap.exists
-            ? readString(asStringKeyMap(ingredientSnap.data()), ['name'], mixtureId)
-            : mixtureName;
+            ? readString(asStringKeyMap(ingredientSnap.data()), ['name'], mixKey)
+            : mixKey;
         await ref.set({
           'id': mixId,
           'branch_id': branchId,
-          'ingredient_id': mixtureId,
+          'ingredient_id': mixKey,
           'ingredient_name': ingredientName,
           'quantity_base': '0',
           'unit': StockUnits.normalize(yieldUnit),
@@ -1480,40 +1596,53 @@ class AdminRepository {
       final costPerBase = yieldBase > Decimal.zero
           ? (mixtureCost / yieldBase).toDecimal(scaleOnInfinitePrecision: 6)
           : Decimal.zero;
+      await AppLog.info('produceMixture: add yield $yieldBase to $mixId');
       await adjustStock(inventoryId: mixId, delta: moneyString(yieldBase), reason: 'Mixture produced');
       await ref.set({
         'unit_cost_per_base': moneyString(costPerBase),
         'kind': 'MIXTURE',
-        'last_produced_at': FieldValue.serverTimestamp(),
+        'last_produced_at': DateTime.now().toUtc().toIso8601String(),
       }, SetOptions(merge: true));
-      await db.collection('businesses').doc(businessId).collection('ingredients').doc(mixtureId).set({
+      await db.collection('businesses').doc(businessId).collection('ingredients').doc(mixKey).set({
         'unit_cost_per_base': moneyString(costPerBase),
         'kind': 'MIXTURE',
       }, SetOptions(merge: true));
 
-      await saveNamed(
-        collection: 'productions',
-        name: mixtureId,
-        extra: {
-          'mixture_id': mixtureId,
-          'yield_quantity_base': moneyString(yieldBase),
-          'unit': StockUnits.baseOf(yieldUnit),
-          'branch_id': branchId,
-          'created_by': _tenant.userId,
-          'total_component_cost': moneyString(mixtureCost),
-          'unit_cost_per_base': moneyString(costPerBase),
-          'components': [
-            for (final line in lines)
-              {
-                'ingredient_id': line.ingredientId.trim().toUpperCase(),
-                'quantity_base': moneyString(StockUnits.toBase(line.quantity, line.unit)),
-                'unit': StockUnits.normalize(line.unit),
-              },
-          ],
-        },
-      );
+      // Production audit is optional — never crash the produce flow if this write is denied.
+      try {
+        final productionId = '$mixKey-${DateTime.now().millisecondsSinceEpoch}';
+        await AppLog.info('produceMixture: save production $productionId');
+        await saveNamed(
+          collection: 'productions',
+          name: mixKey,
+          id: productionId,
+          extra: {
+            'mixture_id': mixKey,
+            'yield_quantity_base': moneyString(yieldBase),
+            'unit': StockUnits.baseOf(yieldUnit),
+            'branch_id': branchId,
+            'created_by': _tenant.userId,
+            'total_component_cost': moneyString(mixtureCost),
+            'unit_cost_per_base': moneyString(costPerBase),
+            'components': [
+              for (final line in lines)
+                {
+                  'ingredient_id': line.ingredientId.trim(),
+                  'quantity_base': moneyString(StockUnits.toBase(line.quantity, line.unit)),
+                  'unit': StockUnits.normalize(line.unit),
+                },
+            ],
+          },
+        );
+      } catch (error, stack) {
+        await AppLog.error('produceMixture: production audit skipped', error, stack);
+      }
+      await AppLog.info('produceMixture: done $mixKey');
+    } on Failure {
+      rethrow;
+    } on FormatException catch (error) {
+      throw Failure(error.message.isEmpty ? 'Invalid quantity entered.' : error.message);
     } catch (error) {
-      if (error is Failure) rethrow;
       throw mapFirebaseFailure(error);
     }
   }

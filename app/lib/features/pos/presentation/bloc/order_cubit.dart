@@ -28,6 +28,7 @@ class CompleteSale {
     this.showAddress = true,
     this.showPhone = true,
     this.online = true,
+    this.printMode = ReceiptPrintMode.both,
   });
 
   final String branchId;
@@ -47,6 +48,7 @@ class CompleteSale {
   final bool showAddress;
   final bool showPhone;
   final bool online;
+  final ReceiptPrintMode printMode;
 }
 
 sealed class OrderState extends Equatable {
@@ -183,9 +185,10 @@ class OrderCubit extends Cubit<OrderState> {
       ),
     );
 
+    final printMode = command.printMode;
     unawaited(() async {
       try {
-        await _printer.printReceipt(receipt);
+        await _printer.printForMode(receipt, printMode);
       } catch (error) {
         if (!isClosed) {
           emit(OrderPrintIssue('Order saved. Receipt was not printed. $error'));
@@ -199,6 +202,21 @@ class OrderCubit extends Cubit<OrderState> {
   Future<void> reprint(ReceiptData receipt) async {
     try {
       await _printer.printReceipt(receipt);
+    } catch (error) {
+      if (!isClosed) {
+        emit(OrderPrintIssue('Reprint failed. $error'));
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> reprintCustomer(ReceiptData receipt) => reprint(receipt.asCustomer());
+
+  Future<void> reprintKitchen(ReceiptData receipt) => reprint(receipt.asKitchen());
+
+  Future<void> reprintBoth(ReceiptData receipt) async {
+    try {
+      await _printer.printForMode(receipt.asCustomer(), ReceiptPrintMode.both);
     } catch (error) {
       if (!isClosed) {
         emit(OrderPrintIssue('Reprint failed. $error'));

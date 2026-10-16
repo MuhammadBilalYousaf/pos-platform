@@ -224,6 +224,10 @@ service cloud.firestore {
         allow read: if canAccess(bizId) && canManageOps(bizId) && (isBizAdmin() || inAssignedBranch(resource.data.branch_id));
         allow create: if canManageOps(bizId) && inAssignedBranch(request.resource.data.branch_id);
       }
+      match /productions/{id} {
+        allow read: if canAccess(bizId) && canManageOps(bizId);
+        allow create, update: if canManageOps(bizId);
+      }
       match /inventory/{id} {
         allow read: if canAccess(bizId) && (isBizAdmin() || isPlatformAdmin() || inAssignedBranch(resource.data.branch_id));
         allow create: if canManageOps(bizId) && inAssignedBranch(request.resource.data.branch_id);

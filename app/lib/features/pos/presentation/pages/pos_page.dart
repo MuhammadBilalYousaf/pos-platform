@@ -4,11 +4,15 @@ import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../admin/data/admin_repository.dart';
+import '../../../orders/presentation/refund_flows.dart';
+import '../../../printing/domain/printer_service.dart';
 import '../../../products/domain/entities/catalog.dart';
 import '../../../products/presentation/bloc/catalog_cubit.dart';
+import '../../../shifts/data/shift_repository.dart';
 import '../../../sync/presentation/bloc/sync_cubit.dart';
 import '../bloc/cart_cubit.dart';
 import '../bloc/order_cubit.dart';
+import '../widgets/discount_editor.dart';
 import '../../../../config/dependency_injection/injection.dart';
 import '../../../../core/firebase/tenant_context.dart';
 import '../../../../core/utils/order_totals.dart';
@@ -127,6 +131,40 @@ class _PosPageState extends State<PosPage> {
               ),
               actions: [
                 TextButton(
+                  onPressed: () async {
+                    try {
+                      await context.read<OrderCubit>().reprintKitchen(state.receipt);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Kitchen ticket sent.')),
+                        );
+                      }
+                    } catch (error) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+                      }
+                    }
+                  },
+                  child: const Text('Print kitchen'),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    try {
+                      await context.read<OrderCubit>().reprintCustomer(state.receipt);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Customer receipt sent.')),
+                        );
+                      }
+                    } catch (error) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+                      }
+                    }
+                  },
+                  child: const Text('Print customer'),
+                ),
+                TextButton(
                   onPressed: () {
                     Navigator.pop(context);
                     context.read<CartCubit>().clear();
@@ -146,37 +184,100 @@ class _PosPageState extends State<PosPage> {
           context.read<OrderCubit>().acknowledge();
         }
       },
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final desktop = constraints.maxWidth >= 1100;
-          if (desktop) {
-            return Row(
-              children: [
-                Expanded(
-                  child: ColoredBox(
-                    color: kAdminPageBg,
-                    child: _ProductPane(search: _search, searchFocus: _searchFocus, productCosts: _productCosts),
+      child: Column(
+        children: [
+          const _ShiftRequiredBanner(),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final desktop = constraints.maxWidth >= 1100;
+                if (desktop) {
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: ColoredBox(
+                          color: kAdminPageBg,
+                          child: _ProductPane(search: _search, searchFocus: _searchFocus, productCosts: _productCosts),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 420,
+                        child: _CartPane(),
+                      ),
+                    ],
+                  );
+                }
+                return ColoredBox(
+                  color: kAdminPageBg,
+                  child: Column(
+                    children: [
+                      const _VerticalCategories(),
+                      _SearchBar(controller: _search, focusNode: _searchFocus),
+                      Expanded(child: _ProductGrid(productCosts: _productCosts)),
+                      const SizedBox(height: 280, child: _CartPane(compact: true)),
+                    ],
                   ),
-                ),
-                SizedBox(
-                  width: 420,
-                  child: _CartPane(),
-                ),
-              ],
-            );
-          }
-          return ColoredBox(
-            color: kAdminPageBg,
-            child: Column(
-              children: [
-                const _VerticalCategories(),
-                _SearchBar(controller: _search, focusNode: _searchFocus),
-                Expanded(child: _ProductGrid(productCosts: _productCosts)),
-                const SizedBox(height: 280, child: _CartPane(compact: true)),
-              ],
+                );
+              },
             ),
-          );
-        },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ShiftRequiredBanner extends StatefulWidget {
+  const _ShiftRequiredBanner();
+
+  @override
+  State<_ShiftRequiredBanner> createState() => _ShiftRequiredBannerState();
+}
+
+class _ShiftRequiredBannerState extends State<_ShiftRequiredBanner> {
+  bool _show = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _check());
+  }
+
+  Future<void> _check() async {
+    if (!mounted) return;
+    final auth = context.read<AuthBloc>().state;
+    if (auth is! AuthAuthenticated || !(auth.session.business?.requireOpenShift ?? false)) {
+      if (mounted) setState(() => _show = false);
+      return;
+    }
+    try {
+      final shift = await sl<ShiftRepository>().getActiveShift();
+      if (mounted) setState(() => _show = shift == null);
+    } catch (_) {
+      if (mounted) setState(() => _show = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_show) return const SizedBox.shrink();
+    return Material(
+      color: const Color(0xFFFEF3C7),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(Icons.schedule, color: Color(0xFF92400E), size: 18),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text(
+                'No open shift — start a shift before taking payment.',
+                style: TextStyle(color: Color(0xFF92400E), fontWeight: FontWeight.w600, fontSize: 13),
+              ),
+            ),
+            TextButton(onPressed: _check, child: const Text('Refresh')),
+          ],
+        ),
       ),
     );
   }
@@ -186,6 +287,54 @@ class _SearchBar extends StatelessWidget {
   const _SearchBar({required this.controller, required this.focusNode});
   final TextEditingController controller;
   final FocusNode focusNode;
+
+  Future<void> _submitBarcode(BuildContext context, String raw) async {
+    final code = raw.trim();
+    if (code.isEmpty) return;
+    final match = context.read<CatalogCubit>().findByBarcode(code);
+    if (match == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No product found for "$code".')),
+      );
+      return;
+    }
+    controller.clear();
+    context.read<CatalogCubit>().search('');
+    await addCatalogProductToCart(context, match.product, preferredVariant: match.variant);
+    if (context.mounted) focusNode.requestFocus();
+  }
+
+  Future<void> _openScan(BuildContext context) async {
+    final code = TextEditingController();
+    final scanned = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Scan barcode'),
+        content: SizedBox(
+          width: 360,
+          child: TextField(
+            controller: code,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Scan or type SKU / barcode',
+              helperText: 'USB scanners type the code and press Enter',
+            ),
+            onSubmitted: (value) => Navigator.pop(dialogContext, value.trim()),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, code.text.trim()),
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+    code.dispose();
+    if (scanned == null || scanned.isEmpty || !context.mounted) return;
+    await _submitBarcode(context, scanned);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -197,14 +346,15 @@ class _SearchBar extends StatelessWidget {
             child: TextField(
               controller: controller,
               focusNode: focusNode,
-              decoration: adminInputDecoration('Search name or SKU (all categories)', icon: Icons.search),
+              decoration: adminInputDecoration('Search name or SKU · Enter to add exact SKU', icon: Icons.search),
               onChanged: context.read<CatalogCubit>().search,
+              onSubmitted: (value) => _submitBarcode(context, value),
             ),
           ),
           const SizedBox(width: 8),
           OutlinedButton.icon(
             style: adminOutlinedButtonStyle,
-            onPressed: () {},
+            onPressed: () => _openScan(context),
             icon: const Icon(Icons.qr_code_scanner, size: 18),
             label: const Text('Scan'),
           ),
@@ -455,9 +605,9 @@ class _ProductGrid extends StatelessWidget {
             final cost = productCosts[product.id];
             final margin = cost == null || cost.isEmpty
                 ? null
-                : money(variant.price) - money(cost);
+                : moneyOrZero(variant.price) - moneyOrZero(cost);
             return InkWell(
-              onTap: () => _add(context, product),
+              onTap: () => addCatalogProductToCart(context, product),
               child: Ink(
                 decoration: BoxDecoration(
                   color: Colors.white,
@@ -473,13 +623,26 @@ class _ProductGrid extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Expanded(
-                        child: Container(
-                          width: double.infinity,
-                          decoration: BoxDecoration(
-                            color: kAdminAccentSoft,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: const Icon(Icons.icecream_outlined, color: kAdminAccent, size: 32),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: product.imageUrl != null && product.imageUrl!.trim().isNotEmpty
+                              ? Image.network(
+                                  product.imageUrl!,
+                                  width: double.infinity,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => const ColoredBox(
+                                    color: kAdminAccentSoft,
+                                    child: Center(
+                                      child: Icon(Icons.icecream_outlined, color: kAdminAccent, size: 32),
+                                    ),
+                                  ),
+                                )
+                              : const ColoredBox(
+                                  color: kAdminAccentSoft,
+                                  child: Center(
+                                    child: Icon(Icons.icecream_outlined, color: kAdminAccent, size: 32),
+                                  ),
+                                ),
                         ),
                       ),
                       const SizedBox(height: 8),
@@ -509,75 +672,88 @@ class _ProductGrid extends StatelessWidget {
     );
   }
 
-  Future<void> _add(BuildContext context, CatalogProduct product) async {
-    if (product.variants.length <= 1 && product.options.isEmpty) {
-      context.read<CartCubit>().addProduct(product);
-      return;
-    }
-    var variant = product.defaultVariant;
-    final selected = <String>{};
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setLocal) {
-            return AlertDialog(
-              title: Text(product.name),
-              content: SizedBox(
-                width: 360,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    DropdownButtonFormField<String>(
-                      initialValue: variant.id,
-                      decoration: const InputDecoration(labelText: 'Size / variant'),
-                      items: [
-                        for (final item in product.variants)
-                          DropdownMenuItem(value: item.id, child: Text('${item.name} · ${item.price}')),
-                      ],
-                      onChanged: (value) {
-                        variant = product.variants.firstWhere((item) => item.id == value);
-                        setLocal(() {});
-                      },
-                    ),
-                    if (product.options.isNotEmpty) ...[
-                      const SizedBox(height: 12),
-                      Align(alignment: Alignment.centerLeft, child: Text('Add-ons', style: Theme.of(context).textTheme.titleSmall)),
-                      for (final option in product.options)
-                        CheckboxListTile(
-                          dense: true,
-                          value: selected.contains(option.id),
-                          title: Text('${option.name} (+${option.extraPrice})'),
-                          onChanged: (value) {
-                            setLocal(() {
-                              if (value == true) {
-                                selected.add(option.id);
-                              } else {
-                                selected.remove(option.id);
-                              }
-                            });
-                          },
-                        ),
+}
+
+Future<void> addCatalogProductToCart(
+  BuildContext context,
+  CatalogProduct product, {
+  ProductVariant? preferredVariant,
+}) async {
+  if (product.variants.length <= 1 && product.options.isEmpty) {
+    context.read<CartCubit>().addProduct(product, variant: preferredVariant ?? product.defaultVariant);
+    return;
+  }
+  // Exact variant barcode with no options → add immediately.
+  if (preferredVariant != null && product.options.isEmpty) {
+    context.read<CartCubit>().addProduct(product, variant: preferredVariant);
+    return;
+  }
+  var variant = preferredVariant ?? product.defaultVariant;
+  final selected = <String>{};
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setLocal) {
+          return AlertDialog(
+            title: Text(product.name),
+            content: SizedBox(
+              width: 360,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DropdownButtonFormField<String>(
+                    initialValue: variant.id,
+                    decoration: const InputDecoration(labelText: 'Size / variant'),
+                    items: [
+                      for (final item in product.variants)
+                        DropdownMenuItem(value: item.id, child: Text('${item.name} · ${item.price}')),
                     ],
+                    onChanged: (value) {
+                      if (value == null) return;
+                      final match = product.variants.where((item) => item.id == value);
+                      if (match.isEmpty) return;
+                      variant = match.first;
+                      setLocal(() {});
+                    },
+                  ),
+                  if (product.options.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Align(alignment: Alignment.centerLeft, child: Text('Add-ons', style: Theme.of(context).textTheme.titleSmall)),
+                    for (final option in product.options)
+                      CheckboxListTile(
+                        dense: true,
+                        value: selected.contains(option.id),
+                        title: Text('${option.name} (+${option.extraPrice})'),
+                        onChanged: (value) {
+                          setLocal(() {
+                            if (value == true) {
+                              selected.add(option.id);
+                            } else {
+                              selected.remove(option.id);
+                            }
+                          });
+                        },
+                      ),
                   ],
-                ),
+                ],
               ),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-                FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Add')),
-              ],
-            );
-          },
-        );
-      },
-    );
-    if (ok == true && context.mounted) {
-      context.read<CartCubit>().addProduct(
-            product,
-            variant: variant,
-            options: product.options.where((item) => selected.contains(item.id)).toList(),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Add')),
+            ],
           );
-    }
+        },
+      );
+    },
+  );
+  if (ok == true && context.mounted) {
+    context.read<CartCubit>().addProduct(
+          product,
+          variant: variant,
+          options: product.options.where((item) => selected.contains(item.id)).toList(),
+        );
   }
 }
 
@@ -614,7 +790,10 @@ class _CartPane extends StatelessWidget {
                           return ListTile(
                             dense: compact,
                             title: Text(line.displayName),
-                            subtitle: Text('${line.quantity} × ${line.variant.price}${line.lineDiscount == '0' || line.lineDiscount.isEmpty ? '' : ' − ${line.lineDiscount}'}'),
+                            subtitle: Text(
+                              '${line.quantity} × ${line.variant.price}'
+                              '${line.lineDiscount == '0' || line.lineDiscount.isEmpty ? '' : ' · disc ${formatDiscountLabel(value: line.lineDiscount, isPercent: line.lineDiscountIsPercent)}'}',
+                            ),
                             onTap: () => _lineDiscount(context, line),
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
@@ -633,9 +812,22 @@ class _CartPane extends StatelessWidget {
                 child: Column(
                   children: [
                     _totalRow('Subtotal', totals.subtotal),
-                    _totalRow('Discount', totals.discountAmount),
+                    _totalRow(
+                      cart.orderDiscount == '0' || cart.orderDiscount.isEmpty || cart.orderDiscount == '0.00'
+                          ? 'Discount'
+                          : 'Discount (${formatDiscountLabel(value: cart.orderDiscount, isPercent: cart.orderDiscountIsPercent)})',
+                      totals.discountAmount,
+                    ),
                     _totalRow('Tax', totals.taxAmount),
                     _totalRow('Total', totals.total, emphasize: true),
+                    const SizedBox(height: 8),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Shortcuts: F2 New · F3 Hold · F4 Pay · F5 Refund · Ctrl+N New · Ctrl+R Refund',
+                        style: TextStyle(fontSize: 11, color: kAdminMuted),
+                      ),
+                    ),
                     const SizedBox(height: 8),
                     Row(
                       children: [
@@ -643,7 +835,7 @@ class _CartPane extends StatelessWidget {
                           child: OutlinedButton(
                             style: adminOutlinedButtonStyle,
                             onPressed: () => context.read<CartCubit>().clear(),
-                            child: const Text('New order'),
+                            child: const Text('New order (F2)'),
                           ),
                         ),
                         const SizedBox(width: 8),
@@ -651,7 +843,7 @@ class _CartPane extends StatelessWidget {
                           child: OutlinedButton(
                             style: adminOutlinedButtonStyle,
                             onPressed: cart.isEmpty ? null : () => context.read<CartCubit>().holdTicket(),
-                            child: const Text('Hold'),
+                            child: const Text('Hold (F3)'),
                           ),
                         ),
                         const SizedBox(width: 8),
@@ -660,6 +852,14 @@ class _CartPane extends StatelessWidget {
                             style: adminOutlinedButtonStyle,
                             onPressed: () => _recall(context),
                             child: Text('Recall (${context.read<CartCubit>().heldTickets.length})'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: OutlinedButton(
+                            style: adminOutlinedButtonStyle,
+                            onPressed: () => openPosRefundPicker(context),
+                            child: const Text('Refund (F5)'),
                           ),
                         ),
                       ],
@@ -672,7 +872,7 @@ class _CartPane extends StatelessWidget {
                         onPressed: cart.isEmpty ? null : () => payCurrentSale(context),
                         child: const Padding(
                           padding: EdgeInsets.symmetric(vertical: 14),
-                          child: Text('Proceed to Payment'),
+                          child: Text('Proceed to Payment (F4)'),
                         ),
                       ),
                     ),
@@ -700,20 +900,20 @@ class _CartPane extends StatelessWidget {
   }
 
   Future<void> _lineDiscount(BuildContext context, CartLine line) async {
-    final amount = TextEditingController(text: line.lineDiscount == '0' ? '' : line.lineDiscount);
-    final ok = await showDialog<bool>(
+    final result = await showDiscountEditor(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Discount · ${line.displayName}'),
-        content: TextField(controller: amount, decoration: const InputDecoration(labelText: 'Line discount amount')),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Apply')),
-        ],
-      ),
+      title: 'Discount · ${line.displayName}',
+      initialValue: line.lineDiscount,
+      initialIsPercent: line.lineDiscountIsPercent,
+      baseAmountLabel: 'Line total before discount: Rs. ${moneyString(line.rawLineTotal)}',
+      baseAmount: line.rawLineTotal,
     );
-    if (ok != true || !context.mounted) return;
-    context.read<CartCubit>().setLineDiscount(line.key, amount.text.trim().isEmpty ? '0' : amount.text.trim());
+    if (result == null || !context.mounted) return;
+    context.read<CartCubit>().setLineDiscount(
+          line.key,
+          result.value,
+          isPercent: result.isPercent,
+        );
   }
 
   Future<void> _ticketMeta(BuildContext context, CartState cart) async {
@@ -721,9 +921,14 @@ class _CartPane extends StatelessWidget {
     final phone = TextEditingController(text: cart.customerPhone ?? '');
     final table = TextEditingController(text: cart.tableNo ?? '');
     final note = TextEditingController(text: cart.note ?? '');
-    final discount = TextEditingController(text: cart.orderDiscount);
+    var orderDiscountValue = cart.orderDiscount;
+    var orderDiscountIsPercent = cart.orderDiscountIsPercent;
     var type = cart.orderType;
     var guests = const <PosCustomer>[];
+    final auth = context.read<AuthBloc>().state;
+    final business = auth is AuthAuthenticated ? auth.session.business : null;
+    final tablesEnabled = business?.diningTablesEnabled ?? false;
+    final tableMap = business?.diningTables ?? const <String>[];
     try {
       guests = await sl<AdminRepository>().listCustomers();
     } catch (_) {}
@@ -733,10 +938,11 @@ class _CartPane extends StatelessWidget {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setLocal) {
+            final showTablePicker = tablesEnabled && type == 'DINE_IN' && tableMap.isNotEmpty;
             return AlertDialog(
               title: const Text('Ticket details'),
               content: SizedBox(
-                width: 400,
+                width: 420,
                 child: SingleChildScrollView(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -768,7 +974,9 @@ class _CartPane extends StatelessWidget {
                           ],
                           onChanged: (value) {
                             if (value == null || value.isEmpty) return;
-                            final guest = guests.firstWhere((item) => item.id == value);
+                            final match = guests.where((item) => item.id == value);
+                            if (match.isEmpty) return;
+                            final guest = match.first;
                             customer.text = guest.name;
                             phone.text = guest.phone ?? '';
                             setLocal(() {});
@@ -780,11 +988,87 @@ class _CartPane extends StatelessWidget {
                       const SizedBox(height: 12),
                       TextField(controller: phone, decoration: const InputDecoration(labelText: 'Phone')),
                       const SizedBox(height: 12),
-                      TextField(controller: table, decoration: const InputDecoration(labelText: 'Table / token')),
+                      if (showTablePicker) ...[
+                        const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text('Table', style: TextStyle(fontWeight: FontWeight.w600)),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            for (final label in tableMap)
+                              ChoiceChip(
+                                label: Text(label),
+                                selected: table.text.trim() == label,
+                                onSelected: (_) {
+                                  table.text = label;
+                                  setLocal(() {});
+                                },
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: table,
+                          decoration: const InputDecoration(
+                            labelText: 'Or custom table / token',
+                            helperText: 'Optional — use for overflow seats or takeaway tokens',
+                          ),
+                          onChanged: (_) => setLocal(() {}),
+                        ),
+                      ] else
+                        TextField(
+                          controller: table,
+                          decoration: InputDecoration(
+                            labelText: tablesEnabled ? 'Table / token (optional)' : 'Token / reference (optional)',
+                            helperText: tablesEnabled
+                                ? 'No fixed table list configured — type any table or token'
+                                : 'Tables disabled in Settings — use a token if you need one',
+                          ),
+                        ),
                       const SizedBox(height: 12),
                       TextField(controller: note, decoration: const InputDecoration(labelText: 'Note')),
                       const SizedBox(height: 12),
-                      TextField(controller: discount, decoration: const InputDecoration(labelText: 'Order discount')),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Order discount'),
+                        subtitle: Text(
+                          formatDiscountLabel(value: orderDiscountValue, isPercent: orderDiscountIsPercent),
+                        ),
+                        trailing: const Icon(Icons.edit_outlined),
+                        onTap: () async {
+                          // Subtotal after line discounts for percent base.
+                          final previewBase = moneyOrZero(
+                            calculateOrderTotals(
+                              lines: [
+                                for (final line in cart.lines)
+                                  OrderLineInput(
+                                    quantity: line.quantity.toString(),
+                                    unitPrice: line.variant.price,
+                                    extraPrice: line.extraPrice,
+                                    discountAmount: line.resolvedLineDiscountAmount,
+                                  ),
+                              ],
+                              orderDiscountAmount: '0',
+                              taxRate: '0',
+                            ).subtotal,
+                          );
+                          final edited = await showDiscountEditor(
+                            context: context,
+                            title: 'Order discount',
+                            initialValue: orderDiscountValue,
+                            initialIsPercent: orderDiscountIsPercent,
+                            baseAmountLabel: 'Order subtotal before this discount: Rs. ${moneyString(previewBase)}',
+                            baseAmount: previewBase,
+                          );
+                          if (edited == null) return;
+                          orderDiscountValue = edited.value;
+                          orderDiscountIsPercent = edited.isPercent;
+                          setLocal(() {});
+                        },
+                      ),
                     ],
                   ),
                 ),
@@ -801,7 +1085,12 @@ class _CartPane extends StatelessWidget {
     if (ok != true || !context.mounted) return;
     context.read<CartCubit>().setOrderType(type);
     context.read<CartCubit>().setCustomer(name: customer.text.trim(), phone: phone.text.trim());
-    context.read<CartCubit>().setTicketMeta(tableNo: table.text.trim(), note: note.text.trim(), discount: discount.text.trim());
+    context.read<CartCubit>().setTicketMeta(
+          tableNo: table.text.trim(),
+          note: note.text.trim(),
+          discount: orderDiscountValue,
+          discountIsPercent: orderDiscountIsPercent,
+        );
     final name = customer.text.trim();
     if (name.isEmpty) return;
     final already = guests.any(
@@ -847,11 +1136,32 @@ Future<void> payCurrentSale(BuildContext context) async {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Add items before taking payment.')));
     return;
   }
+  final authForShift = context.read<AuthBloc>().state;
+  if (authForShift is AuthAuthenticated && (authForShift.session.business?.requireOpenShift ?? false)) {
+    try {
+      final shift = await sl<ShiftRepository>().getActiveShift();
+      if (shift == null) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Start a shift before taking payment (Settings → Require open shift).')),
+          );
+        }
+        return;
+      }
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not check shift: $error')));
+      }
+      return;
+    }
+  }
+  if (!context.mounted) return;
   const methods = ['CASH', 'CARD', 'BANK_TRANSFER', 'EASYPAISA', 'JAZZCASH', 'OTHER'];
   final total = money(cart.totals.total);
   final tendered = TextEditingController(text: cart.totals.total);
   final reference = TextEditingController();
   var method = 'CASH';
+  var printMode = ReceiptPrintMode.both;
   Decimal parseTendered() {
     try {
       return money(tendered.text.trim().isEmpty ? '0' : tendered.text.trim());
@@ -898,6 +1208,21 @@ Future<void> payCurrentSale(BuildContext context) async {
                   Align(
                     alignment: Alignment.centerLeft,
                     child: Text(change >= money('0') ? 'Change: ${moneyString(change)}' : 'Short: ${moneyString(change.abs())}'),
+                  ),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<ReceiptPrintMode>(
+                    initialValue: printMode,
+                    decoration: const InputDecoration(
+                      labelText: 'Print receipts',
+                      helperText: 'Kitchen prints first and cuts, then customer receipt.',
+                    ),
+                    items: [
+                      for (final mode in ReceiptPrintMode.values)
+                        DropdownMenuItem(value: mode, child: Text(mode.label)),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) setLocal(() => printMode = value);
+                    },
                   ),
                 ],
               ),
@@ -951,25 +1276,115 @@ Future<void> payCurrentSale(BuildContext context) async {
           showAddress: session.business?.receiptShowAddress ?? true,
           showPhone: session.business?.receiptShowPhone ?? true,
           online: context.read<SyncCubit>().state.online,
+          printMode: printMode,
         ),
       );
 }
 
-class PosShortcuts extends StatelessWidget {
+/// POS hotkeys that work even when the product search field has focus.
+///
+/// F2 / Ctrl+N — new order (clear cart)
+/// F3 — hold ticket
+/// F4 — pay / checkout
+/// F5 / Ctrl+R — refund picker (searchable orders)
+class PosShortcuts extends StatefulWidget {
   const PosShortcuts({super.key, required this.child});
   final Widget child;
 
   @override
+  State<PosShortcuts> createState() => _PosShortcutsState();
+}
+
+class _PosShortcutsState extends State<PosShortcuts> {
+  @override
+  void initState() {
+    super.initState();
+    // CallbackShortcuts only fire when their Focus subtree owns keys; the search
+    // TextField steals focus on POS, so F-keys never reach it. HardwareKeyboard
+    // receives keys regardless of which field is focused.
+    HardwareKeyboard.instance.addHandler(_onKey);
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onKey);
+    super.dispose();
+  }
+
+  bool _dialogOpen(BuildContext context) {
+    final route = ModalRoute.of(context);
+    // A dialog/popup makes this page route non-current.
+    if (route != null && !route.isCurrent) return true;
+    return false;
+  }
+
+  void _openRefund() {
+    // ignore: unawaited_futures
+    openPosRefundPicker(context);
+  }
+
+  bool _onKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    if (!mounted) return false;
+    if (_dialogOpen(context)) return false;
+
+    final key = event.logicalKey;
+    final ctrl = HardwareKeyboard.instance.isControlPressed;
+
+    if (key == LogicalKeyboardKey.f2 || (key == LogicalKeyboardKey.keyN && ctrl)) {
+      context.read<CartCubit>().clear();
+      return true;
+    }
+    if (key == LogicalKeyboardKey.f3) {
+      context.read<CartCubit>().holdTicket();
+      return true;
+    }
+    if (key == LogicalKeyboardKey.f4) {
+      // Fire-and-forget; pay flow shows its own dialogs/errors.
+      // ignore: unawaited_futures
+      payCurrentSale(context);
+      return true;
+    }
+    if (key == LogicalKeyboardKey.f5 || (key == LogicalKeyboardKey.keyR && ctrl)) {
+      _openRefund();
+      return true;
+    }
+    return false;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    // Keep CallbackShortcuts as a secondary path (helps tests / embedded focus).
     return CallbackShortcuts(
       bindings: {
-        // F2 / Ctrl+N: clear cart and start a new order (does not conflict with F3/F4).
-        const SingleActivator(LogicalKeyboardKey.f2): () => context.read<CartCubit>().clear(),
-        const SingleActivator(LogicalKeyboardKey.keyN, control: true): () => context.read<CartCubit>().clear(),
-        const SingleActivator(LogicalKeyboardKey.f3): () => context.read<CartCubit>().holdTicket(),
-        const SingleActivator(LogicalKeyboardKey.f4): () => payCurrentSale(context),
+        const SingleActivator(LogicalKeyboardKey.f2): () {
+          if (!_dialogOpen(context)) context.read<CartCubit>().clear();
+        },
+        const SingleActivator(LogicalKeyboardKey.keyN, control: true): () {
+          if (!_dialogOpen(context)) context.read<CartCubit>().clear();
+        },
+        const SingleActivator(LogicalKeyboardKey.f3): () {
+          if (!_dialogOpen(context)) context.read<CartCubit>().holdTicket();
+        },
+        const SingleActivator(LogicalKeyboardKey.f4): () {
+          if (!_dialogOpen(context)) {
+            // ignore: unawaited_futures
+            payCurrentSale(context);
+          }
+        },
+        const SingleActivator(LogicalKeyboardKey.f5): () {
+          if (!_dialogOpen(context)) _openRefund();
+        },
+        const SingleActivator(LogicalKeyboardKey.keyR, control: true): () {
+          if (!_dialogOpen(context)) _openRefund();
+        },
       },
-      child: Focus(autofocus: true, child: child),
+      child: Focus(
+        autofocus: true,
+        skipTraversal: true,
+        canRequestFocus: false,
+        child: widget.child,
+      ),
     );
   }
 }

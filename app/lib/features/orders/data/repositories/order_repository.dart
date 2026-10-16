@@ -38,12 +38,27 @@ class PendingOrder {
       };
 
   factory PendingOrder.fromJson(Map<String, dynamic> json) {
+    final key = json['idempotencyKey'];
+    final payload = json['payload'];
+    final status = json['status'];
+    if (key is! String || key.isEmpty || payload is! Map || status is! String) {
+      throw const FormatException('Corrupt pending order entry');
+    }
     return PendingOrder(
-      idempotencyKey: json['idempotencyKey'] as String,
-      payload: Map<String, dynamic>.from(json['payload'] as Map),
-      status: json['status'] as String,
+      idempotencyKey: key,
+      payload: Map<String, dynamic>.from(payload),
+      status: status,
       errorMessage: json['errorMessage'] as String?,
     );
+  }
+
+  /// Soft-parse Hive row; returns null when the entry is corrupt.
+  static PendingOrder? tryFromJson(Map<String, dynamic> json) {
+    try {
+      return PendingOrder.fromJson(json);
+    } catch (_) {
+      return null;
+    }
   }
 }
 
@@ -532,10 +547,25 @@ class OrderRepository {
   }
 
   List<PendingOrder> pending() {
-    return _pending.values
-        .whereType<Map>()
-        .map((item) => PendingOrder.fromJson(Map<String, dynamic>.from(item)))
-        .toList();
+    final result = <PendingOrder>[];
+    final corruptKeys = <dynamic>[];
+    for (final key in _pending.keys) {
+      final raw = _pending.get(key);
+      if (raw is! Map) {
+        corruptKeys.add(key);
+        continue;
+      }
+      final order = PendingOrder.tryFromJson(Map<String, dynamic>.from(raw));
+      if (order == null) {
+        corruptKeys.add(key);
+        continue;
+      }
+      result.add(order);
+    }
+    for (final key in corruptKeys) {
+      _pending.delete(key);
+    }
+    return result;
   }
 
   Future<void> mark(String key, String status, {String? message}) async {
@@ -543,7 +573,11 @@ class OrderRepository {
     if (raw is! Map) {
       return;
     }
-    final order = PendingOrder.fromJson(Map<String, dynamic>.from(raw));
+    final order = PendingOrder.tryFromJson(Map<String, dynamic>.from(raw));
+    if (order == null) {
+      await _pending.delete(key);
+      return;
+    }
     order.status = status;
     order.errorMessage = message;
     if (status == 'SYNCED') {

@@ -72,24 +72,6 @@ class _StockItemPickerState extends State<StockItemPicker> {
           onChanged: (_) => setState(() {}),
         ),
         const SizedBox(height: 8),
-        DropdownButtonFormField<String>(
-          key: ValueKey('picker-$valueInFiltered-${filtered.length}'),
-          initialValue: valueInFiltered,
-          decoration: InputDecoration(labelText: widget.label),
-          isExpanded: true,
-          items: [
-            for (final item in filtered)
-              DropdownMenuItem(
-                value: item.id,
-                child: Text('${item.name} (${item.unit})${item.kind == 'MIXTURE' ? ' · mixture' : ''}'),
-              ),
-          ],
-          onChanged: widget.enabled
-              ? (value) {
-                  widget.onChanged(_find(value));
-                }
-              : null,
-        ),
         if (filtered.isEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 6),
@@ -97,6 +79,25 @@ class _StockItemPickerState extends State<StockItemPicker> {
               'No matching stock items.',
               style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12),
             ),
+          )
+        else
+          DropdownButtonFormField<String>(
+            key: ValueKey('picker-$valueInFiltered-${filtered.length}'),
+            initialValue: valueInFiltered,
+            decoration: InputDecoration(labelText: widget.label),
+            isExpanded: true,
+            items: [
+              for (final item in filtered)
+                DropdownMenuItem(
+                  value: item.id,
+                  child: Text('${item.name} (${item.unit})${item.kind.toUpperCase() == 'MIXTURE' ? ' · mixture' : ''}'),
+                ),
+            ],
+            onChanged: widget.enabled
+                ? (value) {
+                    widget.onChanged(_find(value));
+                  }
+                : null,
           ),
       ],
     );
